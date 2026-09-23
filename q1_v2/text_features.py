@@ -33,6 +33,7 @@ class TextFeatureResult:
     model_revision: str | None
     pooling: str
     windows: list[dict[str, Any]]
+    tokenizer_class: str = ""
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -41,6 +42,7 @@ class TextFeatureResult:
             "model_name": self.model_name,
             "model_revision": self.model_revision,
             "pooling": self.pooling,
+            "tokenizer_class": self.tokenizer_class,
             "windows": self.windows,
             "token_mappings": [asdict(item) for item in self.token_mappings],
         }
@@ -79,6 +81,37 @@ def _make_windows(
             break
         start = max(start + 1, end - max(0, overlap_words))
     return windows
+
+
+def _build_model_inputs(tokenizer: Any, token_ids: list[int], model_type: str) -> tuple[list[int], list[int], list[int]]:
+    """Build one sequence across Transformers 4.x and 5.x tokenizer APIs."""
+    builder = getattr(tokenizer, "build_inputs_with_special_tokens", None)
+    if callable(builder):
+        full_ids = [int(value) for value in builder(token_ids)]
+        special_mask = [
+            int(value) for value in tokenizer.get_special_tokens_mask(
+                token_ids, already_has_special_tokens=False,
+            )
+        ]
+        token_type_builder = getattr(tokenizer, "create_token_type_ids_from_sequences", None)
+        token_type_ids = (
+            [int(value) for value in token_type_builder(token_ids)]
+            if callable(token_type_builder) else [0] * len(full_ids)
+        )
+        return full_ids, special_mask, token_type_ids
+    if model_type != "bert":
+        raise RuntimeError(
+            f"Tokenizer {type(tokenizer).__name__} removed the legacy special-token builder; "
+            f"no audited fallback is defined for model_type={model_type!r}"
+        )
+    if tokenizer.num_special_tokens_to_add(pair=False) != 2:
+        raise RuntimeError("BERT fallback expected exactly [CLS] and [SEP]")
+    if tokenizer.cls_token_id is None or tokenizer.sep_token_id is None:
+        raise RuntimeError("BERT tokenizer is missing CLS/SEP token IDs")
+    full_ids = [int(tokenizer.cls_token_id), *token_ids, int(tokenizer.sep_token_id)]
+    special_mask = [1, *([0] * len(token_ids)), 1]
+    token_type_ids = [0] * len(full_ids)
+    return full_ids, special_mask, token_type_ids
 
 
 def extract_text_features(
@@ -132,15 +165,15 @@ def extract_text_features(
                 for local_index, token_id in enumerate(ids):
                     flat_ids.append(token_id)
                     flat_map.append((word_index, offset + local_index))
-            full_ids = tokenizer.build_inputs_with_special_tokens(flat_ids)
-            special_mask = tokenizer.get_special_tokens_mask(flat_ids, already_has_special_tokens=False)
+            full_ids, special_mask, token_type_ids = _build_model_inputs(
+                tokenizer, flat_ids, str(getattr(model.config, "model_type", "")),
+            )
             if len(full_ids) != len(special_mask):
                 raise RuntimeError("Tokenizer returned inconsistent special-token mapping")
             inputs: dict[str, Any] = {
                 "input_ids": torch.tensor([full_ids], dtype=torch.long, device=device),
                 "attention_mask": torch.ones((1, len(full_ids)), dtype=torch.long, device=device),
             }
-            token_type_ids = tokenizer.create_token_type_ids_from_sequences(flat_ids)
             if "token_type_ids" in getattr(tokenizer, "model_input_names", []):
                 inputs["token_type_ids"] = torch.tensor([token_type_ids], dtype=torch.long, device=device)
             hidden = model(**inputs).last_hidden_state[0].detach().cpu().numpy().astype(np.float32)
@@ -183,6 +216,7 @@ def extract_text_features(
         model_revision=getattr(model.config, "_commit_hash", None),
         pooling=pooling,
         windows=window_metadata,
+        tokenizer_class=type(tokenizer).__name__,
     )
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)

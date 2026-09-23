@@ -24,6 +24,7 @@ class Q1Config:
     sample_rate: int = 16_000
     audio_window_ms: float = 25.0
     audio_hop_ms: float = 10.0
+    f0_window_ms: float = 64.0
     n_mels: int = 64
     fmin_hz: float = 50.0
     fmax_hz: float = 500.0
@@ -35,6 +36,8 @@ class Q1Config:
     mfa_dictionary: str = "english_us_arpa"
     mfa_output_format: str = "json"
     mfa_timeout_s: int = 900
+    mfa_root_dir: str | None = None
+    mfa_work_root: str | None = None
     face_model_path: str | None = None
     face_model_sha256: str | None = None
     inference_device: str = "cpu"
@@ -58,6 +61,10 @@ class Q1Config:
     @property
     def hop_samples(self) -> int:
         return int(round(self.sample_rate * self.audio_hop_ms / 1000.0))
+
+    @property
+    def f0_window_samples(self) -> int:
+        return int(round(self.sample_rate * self.f0_window_ms / 1000.0))
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)

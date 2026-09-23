@@ -7,6 +7,7 @@ import json
 import os
 import time
 import traceback
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +92,7 @@ def process_sample(
     staging = samples_root / f".{record.sample_id}.inprogress-{uuid.uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=False)
     start = time.perf_counter()
+    current_stage = "input_validation"
     try:
         write_json(staging / "sample_input.json", {
             "sample_id": record.sample_id,
@@ -106,6 +108,7 @@ def process_sample(
         if record.read_status != "ok":
             raise RuntimeError("Input validation failed: " + " | ".join(record.errors))
 
+        current_stage = "media"
         media = inspect_and_extract_media(
             record.video_path,
             staging / "audio_mfa_16k_mono.wav",
@@ -115,6 +118,7 @@ def process_sample(
         if not media.audio_timestamp_reliable:
             raise RuntimeError("Audio PTS mapping is unreliable; refusing forced alignment")
 
+        current_stage = "alignment"
         alignment = run_mfa_alignment(
             sample_id=record.sample_id,
             original_text=record.text,
@@ -127,8 +131,9 @@ def process_sample(
             timeline_origin_media_s=media.timeline_origin_media_s,
             duration_s=media.duration_s,
             timeout_s=config.mfa_timeout_s,
-            temporary_directory=output_dir / "cache" / "mfa" / record.sample_id,
+            temporary_directory=Path(config.mfa_work_root) if config.mfa_work_root else None,
         )
+        current_stage = "text"
         text = extract_text_features(
             record.original_words,
             model_name=config.text_model,
@@ -137,6 +142,7 @@ def process_sample(
             overlap_words=config.text_window_overlap_words,
             output_dir=staging,
         )
+        current_stage = "audio"
         audio = extract_audio_features(
             media.waveform,
             sample_rate=config.sample_rate,
@@ -144,6 +150,7 @@ def process_sample(
             alignments=alignment.words,
             window_samples=config.window_samples,
             hop_samples=config.hop_samples,
+            f0_window_samples=config.f0_window_samples,
             n_mels=config.n_mels,
             fmin_hz=config.fmin_hz,
             fmax_hz=config.fmax_hz,
@@ -151,6 +158,7 @@ def process_sample(
         )
         if config.face_model_path is None:
             raise FileNotFoundError("--face-model is required for MediaPipe Face Landmarker")
+        current_stage = "visual"
         visual = extract_visual_features(
             record.video_path,
             media.video_frames,
@@ -165,11 +173,13 @@ def process_sample(
             nearest_max_distance_s=config.nearest_visual_max_distance_s,
             output_dir=staging,
         )
+        current_stage = "fusion"
         build_fused_sample(
             record.sample_id, record.original_words, alignment.words, text, audio, visual,
             output_dir=staging,
         )
         elapsed = time.perf_counter() - start
+        current_stage = "output_validation"
         write_json(staging / "_SUCCESS.json", {
             "sample_id": record.sample_id,
             "status": "success",
@@ -199,6 +209,7 @@ def process_sample(
             "failed_at_utc": _utc_now(),
             "elapsed_s": elapsed,
             "config_sha256": config.fingerprint(),
+            "failure_stage": current_stage,
             "error_type": type(exc).__name__,
             "error": str(exc),
             "traceback": traceback.format_exc(),
@@ -226,6 +237,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--mfa-acoustic-model", default="english_us_arpa")
     parser.add_argument("--mfa-dictionary", default="english_us_arpa")
+    parser.add_argument(
+        "--mfa-root-dir", type=Path, default=None,
+        help="ASCII-only MFA model/config root (sets MFA_ROOT_DIR for child processes)",
+    )
+    parser.add_argument(
+        "--mfa-work-dir", type=Path, default=None,
+        help="ASCII-only native MFA/Kaldi work root; defaults to the system temp directory",
+    )
     parser.add_argument("--manual-reference-csv", type=Path, default=None)
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--skip-decode-probe", action="store_true")
@@ -238,6 +257,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--max-samples must be positive")
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    mfa_work_dir = (
+        args.mfa_work_dir.resolve()
+        if args.mfa_work_dir is not None
+        else (Path(tempfile.gettempdir()) / "q1_v2_mfa_work").resolve()
+    )
+    if not str(mfa_work_dir).isascii():
+        raise SystemExit(f"--mfa-work-dir must be ASCII-only for Windows Kaldi/OpenFST: {mfa_work_dir}")
+    inherited_mfa_root = os.environ.get("MFA_ROOT_DIR")
+    mfa_root_dir = (
+        args.mfa_root_dir.resolve()
+        if args.mfa_root_dir is not None
+        else Path(inherited_mfa_root).resolve() if inherited_mfa_root else None
+    )
+    if mfa_root_dir is not None:
+        if not str(mfa_root_dir).isascii():
+            raise SystemExit(f"--mfa-root-dir must be ASCII-only for Windows Kaldi: {mfa_root_dir}")
+        os.environ["MFA_ROOT_DIR"] = str(mfa_root_dir)
     # Keep model downloads under the selected output tree, which is expected to
     # be git-ignored/external, rather than inside tracked source directories.
     os.environ.setdefault("HF_HOME", str(output_dir / "cache" / "huggingface"))
@@ -254,6 +290,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         text_model=args.text_model,
         mfa_acoustic_model=args.mfa_acoustic_model,
         mfa_dictionary=args.mfa_dictionary,
+        mfa_root_dir=str(mfa_root_dir) if mfa_root_dir is not None else None,
+        mfa_work_root=str(mfa_work_dir),
     )
     save_experiment_config(output_dir, config, vars(args))
     records, loading_summary = load_samples(

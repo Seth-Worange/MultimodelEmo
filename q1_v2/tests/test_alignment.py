@@ -4,12 +4,15 @@ import math
 import unittest
 from pathlib import Path
 
-from q1_v2.alignment import MFAWord, parse_mfa_json, remap_mfa_words
+from q1_v2.alignment import MFAWord, normalize_word, parse_mfa_json, remap_mfa_words
 from q1_v2.io_utils import write_json
 from q1_v2.data_loader import split_original_words
 
 
 class AlignmentTests(unittest.TestCase):
+    def test_curly_apostrophe_normalizes_for_matching(self) -> None:
+        self.assertEqual(normalize_word("They\u2019ve"), "they've")
+
     def test_failed_alignment_preserves_every_original_word(self) -> None:
         original = split_original_words("Hello, mystery world!")
         aligned = [MFAWord("hello", 0.1, 0.3), MFAWord("world", 0.6, 0.9)]

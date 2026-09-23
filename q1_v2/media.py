@@ -78,11 +78,18 @@ class MediaResult:
     timeline_origin_media_s: float
     video_stream_start_media_s: float
     audio_stream_start_media_s: float
+    video_stream_duration_s: float
+    audio_stream_duration_s: float
+    video_stream_end_media_s: float
+    audio_stream_end_media_s: float
     audio_video_start_offset_s: float
     wav_origin_media_s: float
     wav_origin_sample_s: float
     audio_timestamp_reliable: bool
     video_timestamp_reliable: bool
+    decoded_video_last_sample_s: float
+    decoded_audio_end_sample_s: float
+    decoded_audio_duration_s: float
     video_frames: list[VideoFrameTiming]
     audio_chunks: list[AudioChunkTiming]
     waveform: np.ndarray = field(repr=False)
@@ -103,6 +110,10 @@ def _stream_start_seconds(stream: Any) -> float:
     return pts_to_seconds(stream.start_time, stream.time_base)
 
 
+def _stream_duration_seconds(stream: Any) -> float:
+    return pts_to_seconds(stream.duration, stream.time_base)
+
+
 def _container_times(video_path: Path) -> tuple[dict[str, float], list[str]]:
     import av
 
@@ -118,6 +129,8 @@ def _container_times(video_path: Path) -> tuple[dict[str, float], list[str]]:
         )
         video_start = _stream_start_seconds(container.streams.video[0]) if container.streams.video else float("nan")
         audio_start = _stream_start_seconds(container.streams.audio[0]) if container.streams.audio else float("nan")
+        video_duration = _stream_duration_seconds(container.streams.video[0]) if container.streams.video else float("nan")
+        audio_duration = _stream_duration_seconds(container.streams.audio[0]) if container.streams.audio else float("nan")
     if not _finite(container_start):
         warnings.append("missing_container_start_time")
     if not _finite(container_duration):
@@ -131,6 +144,8 @@ def _container_times(video_path: Path) -> tuple[dict[str, float], list[str]]:
         "duration": container_duration,
         "video_start": video_start,
         "audio_start": audio_start,
+        "video_duration": video_duration,
+        "audio_duration": audio_duration,
     }, warnings
 
 
@@ -343,9 +358,14 @@ def inspect_and_extract_media(
         later > earlier for earlier, later in zip(valid_video_times, valid_video_times[1:])
     ) and not any(frame.corrupt for frame in video_frames)
 
+    decoded_video_last = max(valid_video_times, default=float("nan"))
+    decoded_audio_end = (
+        wav_to_sample_time(len(waveform) / sample_rate, wav_origin, timeline_origin)
+        if _finite(wav_origin) else float("nan")
+    )
     observed_end = max(
-        [frame.sample_time_s for frame in video_frames if frame.timestamp_valid]
-        + ([wav_to_sample_time(len(waveform) / sample_rate, wav_origin, timeline_origin)] if _finite(wav_origin) else [])
+        valid_video_times
+        + ([decoded_audio_end] if _finite(decoded_audio_end) else [])
         + [0.0]
     )
     duration = container_times["duration"]
@@ -356,18 +376,33 @@ def inspect_and_extract_media(
     offset = audio_start - video_start if _finite(audio_start) and _finite(video_start) else float("nan")
     result = MediaResult(
         video_path=str(video_path),
-        wav_path=str(wav_path.resolve()),
+        # The sample directory is atomically renamed after processing, so an
+        # absolute staging path would become stale.  This is sample-dir-relative.
+        wav_path=wav_path.name,
         sample_rate=sample_rate,
         duration_s=duration,
         container_start_media_s=container_times["container_start"],
         timeline_origin_media_s=timeline_origin,
         video_stream_start_media_s=video_start,
         audio_stream_start_media_s=audio_start,
+        video_stream_duration_s=container_times["video_duration"],
+        audio_stream_duration_s=container_times["audio_duration"],
+        video_stream_end_media_s=(
+            video_start + container_times["video_duration"]
+            if _finite(video_start) and _finite(container_times["video_duration"]) else float("nan")
+        ),
+        audio_stream_end_media_s=(
+            audio_start + container_times["audio_duration"]
+            if _finite(audio_start) and _finite(container_times["audio_duration"]) else float("nan")
+        ),
         audio_video_start_offset_s=offset,
         wav_origin_media_s=wav_origin,
         wav_origin_sample_s=wav_to_sample_time(0.0, wav_origin, timeline_origin) if _finite(wav_origin) else float("nan"),
         audio_timestamp_reliable=audio_reliable,
         video_timestamp_reliable=video_reliable,
+        decoded_video_last_sample_s=decoded_video_last,
+        decoded_audio_end_sample_s=decoded_audio_end,
+        decoded_audio_duration_s=len(waveform) / sample_rate,
         video_frames=video_frames,
         audio_chunks=audio_chunks,
         waveform=waveform,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import json
 import math
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import unicodedata
+import uuid
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -270,6 +272,31 @@ def _run_probe(command: list[str]) -> dict[str, Any]:
     }
 
 
+def _probe_installed_model(executable: str, model_type: str, model_name: str) -> dict[str, Any]:
+    """Validate a registered model using MFA's official ``model list`` command.
+
+    MFA 3.4.2's dictionary inspector raises an internal ``WindowsPath``
+    exception on Windows.  Listing registered models avoids that upstream bug
+    while still requiring an exact local model-name match.
+    """
+    listing = _run_probe([executable, "model", "list", model_type])
+    installed: list[str] = []
+    if listing["ok"]:
+        try:
+            parsed = ast.literal_eval(str(listing["stdout"]).strip())
+            if isinstance(parsed, (list, tuple)):
+                installed = [str(value) for value in parsed]
+        except (SyntaxError, ValueError):
+            installed = []
+    return {
+        "ok": bool(listing["ok"] and model_name in installed),
+        "requested_name": model_name,
+        "installed_models": installed,
+        "validation_method": f"mfa model list {model_type}",
+        "command_result": listing,
+    }
+
+
 def probe_mfa(acoustic_model: str, dictionary: str) -> dict[str, Any]:
     executable = shutil.which("mfa")
     result: dict[str, Any] = {"executable": executable, "available": bool(executable)}
@@ -277,8 +304,8 @@ def probe_mfa(acoustic_model: str, dictionary: str) -> dict[str, Any]:
         result["blocking_reason"] = "mfa executable not found on PATH"
         return result
     version = _run_probe([executable, "version"])
-    acoustic = _run_probe([executable, "model", "inspect", "acoustic", acoustic_model])
-    lexicon = _run_probe([executable, "model", "inspect", "dictionary", dictionary])
+    acoustic = _probe_installed_model(executable, "acoustic", acoustic_model)
+    lexicon = _probe_installed_model(executable, "dictionary", dictionary)
     result.update({"version": version, "acoustic_model": acoustic, "dictionary": lexicon})
     result["available"] = bool(version["ok"] and acoustic["ok"] and lexicon["ok"])
     if not acoustic["ok"]:
@@ -315,13 +342,35 @@ def run_mfa_alignment(
 
     executable = str(probe["executable"])
     raw_path = output_dir / "mfa_raw.json"
+    if temporary_directory is None:
+        raise ValueError(
+            "An explicit ASCII-only MFA temporary_directory is required on Windows "
+            "so Kaldi/OpenFST never receives a non-ASCII native path"
+        )
+    native_root = temporary_directory.resolve()
+    if not str(native_root).isascii():
+        raise ValueError(f"MFA native work directory must be ASCII-only: {native_root}")
+    native_sample_id = re.sub(r"[^A-Za-z0-9._-]", "_", sample_id).lstrip("-") or "sample"
+    native_attempt = native_root / f"{native_sample_id}-{uuid.uuid4().hex}"
+    native_attempt.mkdir(parents=True, exist_ok=False)
+    native_wav = native_attempt / "input.wav"
+    native_text = native_attempt / "transcript.txt"
+    native_raw = native_attempt / "mfa_raw.json"
+    shutil.copy2(wav_path, native_wav)
+    native_text.write_text(original_text, encoding="utf-8")
     command = [
-        executable, "align_one", str(wav_path), str(original_path), dictionary,
-        acoustic_model, str(raw_path), "--output_format", "json",
+        executable, "align_one", str(native_wav), str(native_text), dictionary,
+        acoustic_model, str(native_raw), "--output_format", "json",
     ]
-    if temporary_directory is not None:
-        temporary_directory.mkdir(parents=True, exist_ok=True)
-        command.extend(["--temporary_directory", str(temporary_directory)])
+    command.extend(["--temporary_directory", str(native_attempt / "temp")])
+    write_json(output_dir / "mfa_native_work.json", {
+        "source_wav_sample_relative_path": wav_path.name,
+        "audit_transcript_sample_relative_path": original_path.name,
+        "native_work_root": str(native_root),
+        "native_attempt_directory": str(native_attempt),
+        "ascii_only": str(native_attempt).isascii(),
+        "retention": "retained for failure diagnosis; raw output is copied into the sample output",
+    })
     write_json(output_dir / "mfa_command.json", {"argv": command})
     completed = subprocess.run(
         command, capture_output=True, text=True, check=False, timeout=timeout_s,
@@ -331,8 +380,9 @@ def run_mfa_alignment(
     (output_dir / "mfa_stderr.log").write_text(completed.stderr, encoding="utf-8")
     if completed.returncode != 0:
         raise RuntimeError(f"MFA align_one failed with exit code {completed.returncode}; see mfa_stderr.log")
-    if not raw_path.is_file():
-        raise RuntimeError(f"MFA reported success but did not create {raw_path.name}")
+    if not native_raw.is_file():
+        raise RuntimeError(f"MFA reported success but did not create {native_raw.name}")
+    shutil.copy2(native_raw, raw_path)
     mfa_words = parse_mfa_output(raw_path)
     words = remap_mfa_words(
         sample_id, original_words, mfa_words,

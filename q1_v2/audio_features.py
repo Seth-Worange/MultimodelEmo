@@ -18,6 +18,9 @@ class AudioFeatureResult:
     frame_times_s: np.ndarray
     frame_start_samples: np.ndarray
     f0_valid_mask: np.ndarray
+    f0_analysis_times_s: np.ndarray
+    f0_analysis_hz: np.ndarray
+    f0_analysis_valid_mask: np.ndarray
     feature_names: list[str]
     word_features: np.ndarray
     word_mask: np.ndarray
@@ -29,6 +32,7 @@ class AudioFeatureResult:
     sample_rate: int
     window_samples: int
     hop_samples: int
+    f0_window_samples: int
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -41,7 +45,10 @@ class AudioFeatureResult:
             "sample_rate": self.sample_rate,
             "window_samples": self.window_samples,
             "hop_samples": self.hop_samples,
+            "f0_window_samples": self.f0_window_samples,
             "frame_time_definition": "wav_origin_sample_s + (frame_start + window_samples/2)/sample_rate",
+            "f0_time_definition": "wav_origin_sample_s + (f0_frame_start + f0_window_samples/2)/sample_rate",
+            "f0_retiming": "nearest observed pYIN center within half one acoustic hop; no interpolation across unvoiced frames",
             "f0_missing_representation": "NaN with separate f0_valid_mask; never coerced to voiced zero",
             "word_frame_indices": self.word_frame_indices,
             "word_failure_reasons": self.word_failure_reasons,
@@ -60,6 +67,37 @@ def _fit_length(values: np.ndarray, count: int, *, fill: float = np.nan) -> np.n
     if len(flat) >= count:
         return flat[:count]
     return np.pad(flat, (0, count - len(flat)), constant_values=fill)
+
+
+def _retime_f0_nearest(
+    source_times_s: np.ndarray,
+    source_f0_hz: np.ndarray,
+    source_valid: np.ndarray,
+    target_times_s: np.ndarray,
+    *,
+    max_distance_s: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map observed pYIN centers to the acoustic grid without inventing F0."""
+    output = np.full(len(target_times_s), np.nan, dtype=np.float32)
+    valid = np.zeros(len(target_times_s), dtype=np.uint8)
+    if not len(source_times_s):
+        return output, valid
+    right = np.searchsorted(source_times_s, target_times_s, side="left")
+    left = np.clip(right - 1, 0, len(source_times_s) - 1)
+    right = np.clip(right, 0, len(source_times_s) - 1)
+    choose_right = np.abs(source_times_s[right] - target_times_s) < np.abs(
+        source_times_s[left] - target_times_s
+    )
+    nearest = np.where(choose_right, right, left)
+    distances = np.abs(source_times_s[nearest] - target_times_s)
+    accepted = (
+        (distances <= max_distance_s + 1e-12)
+        & np.asarray(source_valid, dtype=bool)[nearest]
+        & np.isfinite(source_f0_hz[nearest])
+    )
+    output[accepted] = source_f0_hz[nearest[accepted]].astype(np.float32)
+    valid[accepted] = 1
+    return output, valid
 
 
 def aggregate_audio_to_words(
@@ -112,6 +150,7 @@ def extract_audio_features(
     alignments: Sequence[WordAlignment],
     window_samples: int = 400,
     hop_samples: int = 160,
+    f0_window_samples: int = 1024,
     n_mels: int = 64,
     fmin_hz: float = 50.0,
     fmax_hz: float = 500.0,
@@ -149,18 +188,26 @@ def extract_audio_features(
         y=y, sr=sample_rate, n_fft=window_samples, win_length=window_samples,
         hop_length=hop_samples, center=False,
     ), frame_count)
-    f0, voiced_flag, _voiced_probability = librosa.pyin(
-        y, fmin=fmin_hz, fmax=min(fmax_hz, sample_rate / 2.0 - 1.0), sr=sample_rate,
-        frame_length=window_samples, hop_length=hop_samples, center=False,
+    if f0_window_samples < window_samples:
+        raise ValueError("f0_window_samples must be at least the acoustic window length")
+    y_f0 = y if len(y) >= f0_window_samples else np.pad(y, (0, f0_window_samples - len(y)))
+    f0_source, voiced_flag, _voiced_probability = librosa.pyin(
+        y_f0, fmin=fmin_hz, fmax=min(fmax_hz, sample_rate / 2.0 - 1.0), sr=sample_rate,
+        frame_length=f0_window_samples, hop_length=hop_samples, center=False,
         fill_na=np.nan,
     )
-    f0 = _fit_length(f0, frame_count)
-    voiced = _fit_length(np.asarray(voiced_flag, dtype=np.float32), frame_count, fill=0.0).astype(bool)
-    f0_valid = voiced & np.isfinite(f0)
-    f0[~f0_valid] = np.nan
-    frame_features = np.column_stack([log_mel, rms, f0, zcr, centroid, bandwidth]).astype(np.float32)
     frame_starts = np.arange(frame_count, dtype=np.int64) * hop_samples
     frame_times = wav_origin_sample_s + (frame_starts + window_samples / 2.0) / sample_rate
+    f0_source = np.asarray(f0_source, dtype=np.float32)
+    f0_source_valid = np.asarray(voiced_flag, dtype=bool) & np.isfinite(f0_source)
+    f0_source[~f0_source_valid] = np.nan
+    f0_starts = np.arange(len(f0_source), dtype=np.int64) * hop_samples
+    f0_times = wav_origin_sample_s + (f0_starts + f0_window_samples / 2.0) / sample_rate
+    f0, f0_valid = _retime_f0_nearest(
+        f0_times, f0_source, f0_source_valid, frame_times,
+        max_distance_s=hop_samples / (2.0 * sample_rate),
+    )
+    frame_features = np.column_stack([log_mel, rms, f0, zcr, centroid, bandwidth]).astype(np.float32)
     names = [f"log_mel_{index:02d}" for index in range(n_mels)] + [
         "rms", "f0_hz", "zero_crossing_rate", "spectral_centroid_hz", "spectral_bandwidth_hz",
     ]
@@ -170,6 +217,9 @@ def extract_audio_features(
         frame_times_s=frame_times.astype(np.float64),
         frame_start_samples=frame_starts,
         f0_valid_mask=f0_valid.astype(np.uint8),
+        f0_analysis_times_s=f0_times.astype(np.float64),
+        f0_analysis_hz=f0_source,
+        f0_analysis_valid_mask=f0_source_valid.astype(np.uint8),
         feature_names=names,
         word_features=aggregated[0],
         word_mask=aggregated[1],
@@ -181,6 +231,7 @@ def extract_audio_features(
         sample_rate=sample_rate,
         window_samples=window_samples,
         hop_samples=hop_samples,
+        f0_window_samples=f0_window_samples,
     )
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -190,6 +241,9 @@ def extract_audio_features(
             frame_times_s=result.frame_times_s,
             frame_start_samples=result.frame_start_samples,
             f0_valid_mask=result.f0_valid_mask,
+            f0_analysis_times_s=result.f0_analysis_times_s,
+            f0_analysis_hz=result.f0_analysis_hz,
+            f0_analysis_valid_mask=result.f0_analysis_valid_mask,
             word_features=result.word_features,
             word_mask=result.word_mask,
             word_frame_counts=result.word_frame_counts,

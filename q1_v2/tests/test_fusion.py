@@ -24,9 +24,11 @@ class FusionTests(unittest.TestCase):
         text = TextFeatureResult(np.ones((2, 3), np.float32), np.ones(2, np.uint8), [], 3, 2, "mock", None, "mean", [])
         audio = AudioFeatureResult(
             np.ones((2, 2), np.float32), np.asarray([0.05, 0.15]), np.asarray([0, 1]),
-            np.asarray([1, 0], np.uint8), ["rms", "f0"], np.ones((2, 4), np.float32),
+            np.asarray([1, 0], np.uint8), np.asarray([0.05, 0.15]),
+            np.asarray([120.0, np.nan], np.float32), np.asarray([1, 0], np.uint8),
+            ["rms", "f0"], np.ones((2, 4), np.float32),
             np.asarray([1, 0], np.uint8), [[0, 1], []], np.asarray([2, 0]), np.asarray([1, 0]),
-            np.asarray([[2, 1], [0, 0]]), ["", "word_time_missing"], 16000, 400, 160,
+            np.asarray([[2, 1], [0, 0]]), ["", "word_time_missing"], 16000, 400, 160, 1024,
         )
         visual = VisualFeatureResult(
             np.ones((1, 2), np.float32), np.asarray([0.1]), np.asarray([5]), np.asarray([0.0]),

@@ -14,6 +14,7 @@ from .io_utils import directory_size, read_json, write_csv, write_json
 
 QUALITY_FIELDS = (
     "sample_id", "read_status", "processing_status", "original_word_count",
+    "alignment_status", "text_status", "audio_status", "visual_status",
     "aligned_word_count", "alignment_coverage", "text_valid_count", "text_valid_rate",
     "audio_valid_count", "audio_valid_rate", "visual_valid_count", "visual_valid_rate",
     "visual_no_sample_word_count", "visual_sampling_gap_rate", "sampled_visual_frame_count",
@@ -69,11 +70,79 @@ def _failed_row(record: SampleRecord, sample_dir: Path) -> dict[str, Any]:
         failed = read_json(failed_path)
         reason = str(failed.get("error", "processing_failed"))
         elapsed = failed.get("elapsed_s")
+    else:
+        failed = {}
+
+    stage_outputs = {
+        "alignment": sample_dir / "alignment_metadata.json",
+        "text": sample_dir / "text_features.npz",
+        "audio": sample_dir / "audio_features.npz",
+        "visual": sample_dir / "visual_features.npz",
+    }
+    failure_stage = str(failed.get("failure_stage", ""))
+    if not failure_stage and failed_path.is_file():
+        # Compatibility with first-round failures, which predate the explicit
+        # failure_stage field.  The first absent artifact is the stage that was
+        # attempted; subsequent stages were not evaluated.
+        if not (sample_dir / "media_metadata.json").is_file():
+            failure_stage = "media"
+        else:
+            failure_stage = next(
+                (stage for stage, path in stage_outputs.items() if not path.is_file()),
+                "fusion",
+            )
+
+    stage_status: dict[str, str] = {}
+    reached_failure = False
+    for stage, path in stage_outputs.items():
+        if path.is_file():
+            stage_status[stage] = "evaluated"
+        elif failed_path.is_file() and stage == failure_stage:
+            stage_status[stage] = "failed"
+            reached_failure = True
+        else:
+            stage_status[stage] = "not_evaluated" if reached_failure or failed_path.is_file() else "not_evaluated"
+
+    counts: dict[str, int | None] = {
+        "alignment": None,
+        "text": None,
+        "audio": None,
+        "visual": None,
+    }
+    alignment_path = stage_outputs["alignment"]
+    if alignment_path.is_file():
+        words = read_json(alignment_path).get("words", [])
+        counts["alignment"] = sum(bool(word.get("alignment_mask")) for word in words)
+    for stage, mask_name in (("text", "mask"), ("audio", "word_mask"), ("visual", "word_mask")):
+        path = stage_outputs[stage]
+        if path.is_file():
+            with np.load(path, allow_pickle=False) as arrays:
+                counts[stage] = int(np.asarray(arrays[mask_name], dtype=bool).sum())
+    for stage in counts:
+        if counts[stage] is None and stage_status[stage] == "failed":
+            counts[stage] = 0
+
+    def stage_rate(stage: str) -> float | None:
+        count = counts[stage]
+        return None if count is None else _safe_rate(count, record.word_count)
+
     return {
         "sample_id": record.sample_id,
         "read_status": record.read_status,
         "processing_status": "failed" if failed_path.is_file() else "not_processed",
         "original_word_count": record.word_count,
+        "alignment_status": stage_status["alignment"],
+        "text_status": stage_status["text"],
+        "audio_status": stage_status["audio"],
+        "visual_status": stage_status["visual"],
+        "aligned_word_count": counts["alignment"],
+        "alignment_coverage": stage_rate("alignment"),
+        "text_valid_count": counts["text"],
+        "text_valid_rate": stage_rate("text"),
+        "audio_valid_count": counts["audio"],
+        "audio_valid_rate": stage_rate("audio"),
+        "visual_valid_count": counts["visual"],
+        "visual_valid_rate": stage_rate("visual"),
         "processing_elapsed_s": elapsed,
         "output_size_bytes": directory_size(sample_dir) if sample_dir.is_dir() else 0,
         "failure_reason": reason,
@@ -109,6 +178,10 @@ def sample_quality(record: SampleRecord, sample_dir: Path) -> dict[str, Any]:
         "read_status": record.read_status,
         "processing_status": "success",
         "original_word_count": n_words,
+        "alignment_status": "evaluated",
+        "text_status": "evaluated",
+        "audio_status": "evaluated",
+        "visual_status": "evaluated",
         "aligned_word_count": aligned_count,
         "alignment_coverage": _safe_rate(aligned_count, n_words),
         "text_valid_count": int(text.sum()),
@@ -214,9 +287,26 @@ def evaluate_manual_references(
 def _aggregate(rows: Sequence[dict[str, Any]], manual: dict[str, Any] | None) -> dict[str, Any]:
     successful = [row for row in rows if row.get("processing_status") == "success"]
     total_words = sum(int(row.get("original_word_count") or 0) for row in rows)
-    aligned_words = sum(int(row.get("aligned_word_count") or 0) for row in successful)
-    total_visual_frames = sum(int(row.get("sampled_visual_frame_count") or 0) for row in successful)
-    failed_faces = sum(int(row.get("face_detection_failure_count") or 0) for row in successful)
+    stage_rows = {
+        stage: [row for row in rows if row.get(f"{stage}_status") in {"evaluated", "failed"}]
+        for stage in ("alignment", "text", "audio", "visual")
+    }
+
+    def stage_total_words(stage: str) -> int:
+        return sum(int(row.get("original_word_count") or 0) for row in stage_rows[stage])
+
+    def stage_rate(stage: str, count_field: str) -> float | None:
+        selected = stage_rows[stage]
+        if not selected:
+            return None
+        return _safe_rate(
+            sum(int(row.get(count_field) or 0) for row in selected),
+            stage_total_words(stage),
+        )
+
+    aligned_words = sum(int(row.get("aligned_word_count") or 0) for row in stage_rows["alignment"])
+    total_visual_frames = sum(int(row.get("sampled_visual_frame_count") or 0) for row in stage_rows["visual"])
+    failed_faces = sum(int(row.get("face_detection_failure_count") or 0) for row in stage_rows["visual"])
     return {
         "sample_file_coverage": _safe_rate(sum(record.get("read_status") == "ok" for record in rows), len(rows)),
         "sample_processing_success_rate": _safe_rate(len(successful), len(rows)),
@@ -227,11 +317,17 @@ def _aggregate(rows: Sequence[dict[str, Any]], manual: dict[str, Any] | None) ->
             int(row.get("original_word_count") or 0) for row in successful
         ),
         "aligned_word_count": aligned_words,
-        "automatic_alignment_coverage_not_accuracy": _safe_rate(aligned_words, total_words),
-        "text_word_valid_rate": _safe_rate(sum(int(row.get("text_valid_count") or 0) for row in successful), total_words),
-        "audio_word_valid_rate": _safe_rate(sum(int(row.get("audio_valid_count") or 0) for row in successful), total_words),
-        "visual_word_valid_rate": _safe_rate(sum(int(row.get("visual_valid_count") or 0) for row in successful), total_words),
-        "face_detection_failure_rate": _safe_rate(failed_faces, total_visual_frames),
+        "alignment_evaluated_sample_count": len(stage_rows["alignment"]),
+        "text_evaluated_sample_count": len(stage_rows["text"]),
+        "audio_evaluated_sample_count": len(stage_rows["audio"]),
+        "visual_evaluated_sample_count": len(stage_rows["visual"]),
+        "automatic_alignment_coverage_not_accuracy": stage_rate("alignment", "aligned_word_count"),
+        "text_word_valid_rate": stage_rate("text", "text_valid_count"),
+        "audio_word_valid_rate": stage_rate("audio", "audio_valid_count"),
+        "visual_word_valid_rate": stage_rate("visual", "visual_valid_count"),
+        "face_detection_failure_rate": (
+            _safe_rate(failed_faces, total_visual_frames) if stage_rows["visual"] else None
+        ),
         "total_output_size_bytes": sum(int(row.get("output_size_bytes") or 0) for row in rows),
         "manual_alignment_evaluation": manual,
         "accuracy_note": (

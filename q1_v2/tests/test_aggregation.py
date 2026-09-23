@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from q1_v2.alignment import WordAlignment
-from q1_v2.audio_features import aggregate_audio_to_words
+from q1_v2.audio_features import _retime_f0_nearest, aggregate_audio_to_words
 from q1_v2.visual_features import aggregate_visual_to_words
 
 
@@ -14,6 +14,18 @@ def word(index: int, start: float, end: float, mask: int = 1) -> WordAlignment:
 
 
 class AggregationTests(unittest.TestCase):
+    def test_f0_retiming_preserves_unvoiced_missingness(self) -> None:
+        values, mask = _retime_f0_nearest(
+            np.asarray([0.032, 0.042, 0.052]),
+            np.asarray([120.0, np.nan, 125.0]),
+            np.asarray([1, 0, 1], dtype=np.uint8),
+            np.asarray([0.030, 0.040, 0.050]),
+            max_distance_s=0.005,
+        )
+        self.assertTrue(np.isfinite(values[0]))
+        self.assertTrue(np.isnan(values[1]))
+        self.assertEqual(mask.tolist(), [1, 0, 1])
+
     def test_audio_frame_association_and_missing_mask(self) -> None:
         times = np.asarray([0.05, 0.15, 0.25, 0.35])
         features = np.asarray([[1.0, np.nan], [3.0, 100.0], [5.0, 110.0], [7.0, np.nan]], dtype=np.float32)

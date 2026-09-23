@@ -262,8 +262,12 @@ def extract_visual_features(
     FaceLandmarker = mp.tasks.vision.FaceLandmarker
     FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
     RunningMode = mp.tasks.vision.RunningMode
+    # MediaPipe's native Windows file loader can fail on non-ASCII absolute
+    # paths even though Python can read the file.  Supplying the documented
+    # in-memory asset keeps paths with Chinese characters fully supported.
+    model_asset = face_model_path.read_bytes()
     options = FaceLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=str(face_model_path)),
+        base_options=BaseOptions(model_asset_buffer=model_asset),
         running_mode=RunningMode.VIDEO,
         num_faces=max_faces,
         min_face_detection_confidence=min_face_detection_confidence,
