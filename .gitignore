@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Local environments and downloaded model files
+.venv/
+venv/
+env/
+*.pt
+*.pth
+*.safetensors
+*.task
+
+# Local data, caches, and generated outputs
+/data/
+/cache/
+/outputs/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini

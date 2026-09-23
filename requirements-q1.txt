@@ -1,0 +1,6 @@
+# Install into the same environment as requirements.txt after checking that
+# the chosen wheels preserve its CUDA-enabled PyTorch build.
+transformers>=4.45
+whisperx>=3.3
+mediapipe>=0.10
+opencv-python>=4.8
