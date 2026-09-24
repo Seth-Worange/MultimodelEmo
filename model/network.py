@@ -1,34 +1,28 @@
-'''
-Author: Orange
-Date: 2026-09-23 08:54
-LastEditors: Orange
-LastEditTime: 2026-09-23 09:19
-FilePath: model.py
-Description: 
-
-'''
 from __future__ import annotations
-
-"""Masked temporal fusion with token-distillation and contextual-BERT text modes."""
-
 import torch
 from torch import nn
 from torch.nn import functional as F
 
-from data import AUDIO_DIM, SEQ_LEN, TEXT_DIM, VISION_DIM, VOCAB_SIZE
+from utils.data import AUDIO_DIM, SEQ_LEN, TEXT_DIM, VISION_DIM, VOCAB_SIZE
 
 
 class AffectiveModel(nn.Module):
     def __init__(self, embedding_dim: int = 96, hidden_dim: int = 64, fusion: str = "gate",
-                 text_mode: str = "tokens", audio_dynamics: bool = False):
+                 text_mode: str = "tokens", audio_dynamics: bool = False,
+                 regression_mode: str = "hard", dropout: float = 0.0):
         super().__init__()
         if fusion not in {"gate", "concat"}:
             raise ValueError(f"Unknown fusion mode: {fusion}")
         if text_mode not in {"tokens", "bert"}:
             raise ValueError(f"Unknown text mode: {text_mode}")
+        if regression_mode not in {"hard", "soft", "signed"}:
+            raise ValueError(f"Unknown regression mode: {regression_mode}")
+        if not 0 <= dropout < 1:
+            raise ValueError("Dropout must be in [0, 1)")
         self.fusion = fusion
         self.text_mode = text_mode
         self.audio_dynamics = audio_dynamics
+        self.regression_mode = regression_mode
         width = hidden_dim * 2
         if text_mode == "tokens":
             self.embedding = nn.Embedding(VOCAB_SIZE, embedding_dim, padding_idx=0)
@@ -45,12 +39,15 @@ class AffectiveModel(nn.Module):
         self.vision_gru = nn.GRU(width, hidden_dim, batch_first=True, bidirectional=True)
         if fusion == "gate":
             self.gate = nn.Linear(width, 1)
+            self.availability_embedding = nn.Embedding(8, width, padding_idx=0)
+            nn.init.zeros_(self.availability_embedding.weight)
         else:
             self.fusion_input = nn.Sequential(
                 nn.Linear(width * 3 + 3, width), nn.LayerNorm(width), nn.GELU()
             )
         self.fusion_gru = nn.GRU(width, hidden_dim, batch_first=True, bidirectional=True)
         self.pool_score = nn.Linear(width, 1)
+        self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(width, 3)
         self.regressor = nn.Linear(width, 1)
 
@@ -100,6 +97,10 @@ class AffectiveModel(nn.Module):
         if self.fusion == "gate":
             modality_weights = self._masked_softmax(self.gate(states).squeeze(-1), available, dim=2)
             fused = (states * modality_weights.unsqueeze(-1)).sum(dim=2)
+            # 将三种模态掩码编码为可学习的组合表示。
+            bits = available.to(torch.long) * available.new_tensor((1, 2, 4), dtype=torch.long)
+            availability = bits.sum(dim=2)
+            fused = fused + self.availability_embedding(availability)
         else:
             masked_states = states * available.unsqueeze(-1).to(states.dtype)
             fused = self.fusion_input(torch.cat((masked_states.flatten(2), available.to(states.dtype)), dim=2))
@@ -108,9 +109,19 @@ class AffectiveModel(nn.Module):
         fused_state, _ = self.fusion_gru(fused)
         time_weights = self._masked_softmax(self.pool_score(fused_state).squeeze(-1), valid_steps, dim=1)
         pooled = (fused_state * time_weights.unsqueeze(-1)).sum(dim=1)
+        pooled = self.dropout(pooled)
         logits = self.classifier(pooled)
-        magnitude = 3.0 * torch.sigmoid(self.regressor(pooled).squeeze(-1))
-        sentiment = magnitude * (logits.argmax(dim=-1) - 1).to(magnitude.dtype)
+        raw_strength = self.regressor(pooled).squeeze(-1)
+        if self.regression_mode == "signed":
+            sentiment = 3.0 * torch.tanh(raw_strength)
+            magnitude = sentiment.abs()
+        else:
+            magnitude = 3.0 * torch.sigmoid(raw_strength)
+        if self.regression_mode == "soft":
+            probabilities = logits.softmax(dim=-1)
+            sentiment = magnitude * (probabilities[:, 2] - probabilities[:, 0])
+        elif self.regression_mode == "hard":
+            sentiment = magnitude * (logits.argmax(dim=-1) - 1).to(magnitude.dtype)
         result = {
             "logits": logits,
             "magnitude": magnitude,
@@ -153,6 +164,16 @@ def demo() -> None:
     assert dynamics.shape == (2, SEQ_LEN, AUDIO_DIM * 2)
     assert torch.equal(dynamics[:, 1, AUDIO_DIM:], torch.ones(2, AUDIO_DIM))
     assert torch.count_nonzero(dynamics[:, 3:5, AUDIO_DIM:]) == 0
+    soft_model = AffectiveModel(regression_mode="soft")
+    soft_out = soft_model(tokens, torch.full((2,), 4), torch.zeros(2, SEQ_LEN, AUDIO_DIM),
+                          torch.zeros(2, SEQ_LEN, VISION_DIM), mask, mask, mask)
+    soft_out["sentiment"].sum().backward()
+    assert soft_model.classifier.weight.grad is not None
+    signed_model = AffectiveModel(regression_mode="signed")
+    signed_out = signed_model(tokens, torch.full((2,), 4), torch.zeros(2, SEQ_LEN, AUDIO_DIM),
+                              torch.zeros(2, SEQ_LEN, VISION_DIM), mask, mask, mask)
+    signed_out["sentiment"].sum().backward()
+    assert signed_model.regressor.weight.grad is not None
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Generate attachment 3 predictions or attachment 4 predictions with evidence."""
+"""生成附件3预测或附件4预测与解释。"""
 
 from __future__ import annotations
 
@@ -7,14 +7,16 @@ import csv
 import itertools
 import json
 import math
-import os
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from data import prepare_sample, read_pickle, resolve_data_root
+from utils.data import prepare_sample, read_pickle, resolve_data_root
+from utils.config import parse_config_args
+from utils.text import encode_text, load_text_encoder
 from model import AffectiveModel
+from model.fuse_net import FactorizedAffectiveModel
 
 LABELS = ("Negative", "Neutral", "Positive")
 MODALITIES = ("text", "audio", "vision")
@@ -25,15 +27,35 @@ class ModelEnsemble(torch.nn.Module):
         super().__init__()
         if any(model.text_mode != models[0].text_mode for model in models):
             raise ValueError("Ensemble checkpoints must use the same text mode")
+        if any(model.regression_mode != models[0].regression_mode for model in models):
+            raise ValueError("Ensemble checkpoints must use the same regression mode")
         self.text_mode = models[0].text_mode
+        self.regression_mode = models[0].regression_mode
         self.models = torch.nn.ModuleList(models)
 
     def forward(self, *inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         outputs = [model(*inputs) for model in self.models]
         logits = torch.stack([output["logits"] for output in outputs]).mean(dim=0)
         magnitude = torch.stack([output["magnitude"] for output in outputs]).mean(dim=0)
-        sentiment = magnitude * (logits.argmax(dim=-1) - 1).to(magnitude.dtype)
+        if self.regression_mode == "signed":
+            sentiment = torch.stack([output["sentiment"] for output in outputs]).mean(dim=0)
+            magnitude = sentiment.abs()
+        elif self.regression_mode == "soft":
+            probabilities = logits.softmax(dim=-1)
+            sentiment = magnitude * (probabilities[:, 2] - probabilities[:, 0])
+        else:
+            sentiment = magnitude * (logits.argmax(dim=-1) - 1).to(magnitude.dtype)
         return {"logits": logits, "magnitude": magnitude, "sentiment": sentiment}
+
+
+def build_from_config(config: dict | None) -> torch.nn.Module:
+    """按检查点里记录的结构配置还原模型（缺省为门控基线）。"""
+    config = dict(config or {})
+    architecture = config.pop("architecture", "baseline")
+    if architecture == "fuse":
+        return FactorizedAffectiveModel(**config)
+    config.pop("tau", None)
+    return AffectiveModel(**config)
 
 
 def load_model(path: Path | list[Path], device: torch.device) -> torch.nn.Module:
@@ -43,21 +65,15 @@ def load_model(path: Path | list[Path], device: torch.device) -> torch.nn.Module
     models = []
     for checkpoint_path in paths:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        model = AffectiveModel(**checkpoint.get("model_config", {}))
-        model.load_state_dict(checkpoint["model"])
+        model = build_from_config(checkpoint.get("model_config", {}))
+        state = checkpoint["model"]
+        if getattr(model, "fusion", None) == "gate" and "availability_embedding.weight" not in state:
+            # 旧权重用零嵌入保持原有预测行为。
+            state = {**state, "availability_embedding.weight": model.availability_embedding.weight}
+        model.load_state_dict(state)
         models.append(model)
     ensemble = models[0] if len(models) == 1 else ModelEnsemble(models)
     return ensemble.to(device).eval()
-
-
-def load_text_encoder(device: torch.device):
-    os.environ.setdefault("HF_HOME", str(Path(__file__).resolve().parent / "cache" / "huggingface"))
-    os.environ.setdefault("USE_TF", "0")
-    try:
-        from transformers import AutoModel
-    except ImportError as error:
-        raise RuntimeError("Install transformers to encode text for bert-mode checkpoints") from error
-    return AutoModel.from_pretrained("google-bert/bert-base-uncased", local_files_only=True).to(device).eval()
 
 
 def tensor_item(item: dict, device: torch.device) -> dict[str, torch.Tensor]:
@@ -83,14 +99,15 @@ def margin(logits: torch.Tensor, label: int) -> float:
 
 
 @torch.inference_mode()
-def explain_one(model: torch.nn.Module, batch: dict[str, torch.Tensor], window: int = 5, stride: int = 2):
+def explain_one(model: torch.nn.Module, batch: dict[str, torch.Tensor], window: int = 5,
+                stride: int = 2, text_encoder=None):
     base_masks = {name: batch[f"{name}_mask"].clone() for name in MODALITIES}
     full = run_model(model, batch, base_masks)
     predicted = int(full["logits"].argmax(dim=1).item())
     base_margin = margin(full["logits"], predicted)
     values: dict[tuple[str, ...], tuple[float, float]] = {}
 
-    # Eight forward passes give exact Shapley values for three modalities.
+    # 三模态共8个子集，计算精确 Shapley 值。
     for count in range(4):
         for subset in itertools.combinations(MODALITIES, count):
             masks = {name: base_masks[name] if name in subset else torch.zeros_like(base_masks[name])
@@ -136,6 +153,10 @@ def explain_one(model: torch.nn.Module, batch: dict[str, torch.Tensor], window: 
             if modality == "text":
                 ablated["tokens"] = batch["tokens"].clone()
                 ablated["tokens"][:, 0, start:end] = 0
+                if model.text_mode == "bert":
+                    if text_encoder is None:
+                        raise ValueError("Text occlusion requires the frozen BERT encoder")
+                    ablated["teacher"] = encode_text(ablated, text_encoder, masks["text"])
             else:
                 ablated[modality] = batch[modality].clone()
                 ablated[modality][:, start:end] = 0
@@ -177,30 +198,37 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--part", choices=("q2", "q3"), required=True)
-    parser.add_argument("--checkpoint", type=Path, action="append", required=True,
-                        help="repeat to average multiple trained checkpoints")
+    parser.add_argument("--part", choices=("q2", "q3"))
+    parser.add_argument("--checkpoint", type=Path, action="append",
+                        help="可重复指定多个检查点并集成")
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--input-dir", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "outputs" / "predictions")
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent.parent / "outputs" / "predictions")
     parser.add_argument("--alignment-file", type=Path, default=None,
-                        help="JSON from align_q3.py; required for video-time evidence")
-    parser.add_argument("--max-samples", type=int, default=0, help="0 processes every matching file")
+                        help="align_q3.py 生成的词时间映射")
+    parser.add_argument("--max-samples", type=int, default=0, help="0 表示处理全部样本")
     parser.add_argument("--device", default="auto")
-    args = parser.parse_args()
+    args = parse_config_args(parser, "infer")
+    if args.part is None or not args.checkpoint:
+        parser.error("provide --part and --checkpoint or set them in the config")
     root = resolve_data_root(args.data_root)
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available()
                           else "cpu" if args.device == "auto" else args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
     model = load_model(args.checkpoint, device)
-    text_encoder = None
+    text_encoder = load_text_encoder(device) if model.text_mode == "bert" and args.part == "q3" else None
     files = find_files(root, args.part, args.input_dir)
     if args.max_samples < 0:
         parser.error("max-samples must be non-negative")
     if args.max_samples:
         files = files[:args.max_samples]
-    alignment = json.loads(args.alignment_file.read_text(encoding="utf-8")) if args.alignment_file else {}
+    alignment = {}
+    if args.alignment_file:
+        if not args.alignment_file.is_file():
+            raise FileNotFoundError(
+                f"alignment file not found: {args.alignment_file}; run `python -m scripts.align_q3` first")
+        alignment = json.loads(args.alignment_file.read_text(encoding="utf-8"))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     predictions, explanations = [], []
 
@@ -213,9 +241,7 @@ def main() -> None:
             if text_encoder is None:
                 text_encoder = load_text_encoder(device)
             tokens = batch["tokens"]
-            with torch.inference_mode():
-                batch["teacher"] = text_encoder(input_ids=tokens[:, 0], attention_mask=tokens[:, 1],
-                                                token_type_ids=tokens[:, 2]).last_hidden_state
+            batch["teacher"] = encode_text(batch, text_encoder)
         with torch.inference_mode():
             output = run_model(model, batch)
         probabilities = torch.softmax(output["logits"], dim=1)[0].cpu().numpy()
@@ -229,11 +255,14 @@ def main() -> None:
             "p_neutral": float(probabilities[1]),
             "p_positive": float(probabilities[2]),
             "raw_text": item["raw_text"],
+            "available_modalities": ",".join(m for m in MODALITIES if item[f"{m}_mask"].any()),
+            "missing_modalities": ",".join(m for m in MODALITIES if not item[f"{m}_mask"].any()),
         }
         print(f"{args.part}: {sample_id} -> {row['polarity']}, {row['sentiment_strength']:.3f}")
 
         if args.part == "q3":
-            full, predicted, phi_cls, phi_reg, share, main_modality, windows = explain_one(model, batch)
+            full, predicted, phi_cls, phi_reg, share, main_modality, windows = explain_one(
+                model, batch, text_encoder=text_encoder)
             row.update({f"shapley_class_{m}": phi_cls[m] for m in MODALITIES})
             row.update({f"class_share_{m}": share[m] for m in MODALITIES})
             row.update({f"shapley_strength_{m}": phi_reg[m] for m in MODALITIES})
@@ -247,9 +276,9 @@ def main() -> None:
                           if positions[i] is not None] if positions else []
                 timed = item_alignment.get("token_match_fraction", 0.0) >= 0.9 and bool(mapped)
                 evidence = {"id": sample_id, "rank_global": rank, **window_row,
-                            "evidence_words": " ".join(dict.fromkeys(p["word"] for p in mapped)),
-                            "start_seconds": min((p["start"] for p in mapped), default=""),
-                            "end_seconds": max((p["end"] for p in mapped), default=""),
+                            "evidence_words": " ".join(dict.fromkeys(p["word"] for p in mapped)) if timed else "",
+                            "start_seconds": min(p["start"] for p in mapped) if timed else "",
+                            "end_seconds": max(p["end"] for p in mapped) if timed else "",
                             "alignment_status": "mapped" if timed else item_alignment.get("status", "position_only")}
                 explanations.append(evidence)
         predictions.append(row)

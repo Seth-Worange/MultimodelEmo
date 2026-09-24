@@ -1,0 +1,8 @@
+extract:
+  data_root: data
+  device: cuda
+  output_dir: outputs/features_q1_face_pose
+  text_model: google-bert/bert-base-uncased
+  face_model: task/face_landmarker.task
+  pose_model: task/pose_landmarker_full.task
+  max_samples: 0

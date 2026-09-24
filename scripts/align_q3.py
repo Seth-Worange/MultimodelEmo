@@ -1,4 +1,4 @@
-"""Recover token-to-time mappings for attachment 4's explanatory evidence."""
+"""恢复附件4词元到视频时间的映射。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data import prepare_sample, read_pickle, resolve_data_root
-from features_q1 import align_words, configure_cache, decode_audio
+from utils.data import prepare_sample, read_pickle, resolve_data_root
+from utils.config import parse_config_args
+from scripts.features_q1 import align_words, configure_cache, decode_audio
 
 
 def main() -> None:
@@ -18,10 +19,10 @@ def main() -> None:
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--input-dir", type=Path, default=None)
     parser.add_argument("--video-dir", type=Path, default=None)
-    parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent / "outputs" / "runs" / "main" / "q3_alignment.json")
+    parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent.parent / "outputs" / "runs" / "main" / "q3_alignment.json")
     parser.add_argument("--text-model", default="google-bert/bert-base-uncased")
     parser.add_argument("--device", default="auto")
-    args = parser.parse_args()
+    args = parse_config_args(parser, "align")
     configure_cache()
     root = resolve_data_root(args.data_root)
     input_dir = args.input_dir or next(root.glob(

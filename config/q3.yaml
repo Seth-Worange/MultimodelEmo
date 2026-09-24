@@ -1,0 +1,15 @@
+align:
+  data_root: data
+  device: cuda
+  output: outputs/runs/main/q3_alignment.json
+
+infer:
+  part: q3
+  checkpoint:
+    - outputs/runs/availability_s2026/best.pt
+    - outputs/runs/availability_s2027/best.pt
+  device: cuda
+  data_root: data
+  output_dir: outputs/predictions_availability_q3
+  alignment_file: outputs/runs/main/q3_alignment.json
+  max_samples: 0

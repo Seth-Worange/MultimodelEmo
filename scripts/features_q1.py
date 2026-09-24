@@ -1,13 +1,10 @@
-"""Extract traceable word-aligned features for the 100 original video clips.
-
-Requires the optional question-1 packages listed in requirements-q1.txt and
-the locally installed/downloadable English BERT and WhisperX aligner weights.
-"""
+"""提取100段视频的词级音视频特征及对齐信息。"""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -20,20 +17,27 @@ import numpy as np
 import torch
 from openpyxl import load_workbook
 
+from utils.config import parse_config_args
+
 SAMPLE_RATE = 16000
 N_MELS = 40
 N_FFT = 512
 FRAME = 400
 HOP = 160
-FACE_POINTS = (10, 151, 9, 168, 1, 2, 33, 133, 159, 145, 362, 263, 386, 374, 61, 291, 13)
-REVIEW_ALIGNMENT_SCORE = 0.3  # Screening heuristic; inspect these clips manually.
+# 鼻尖仅作原点，输出肩、肘、腕和髋部姿态。
+FACE_POINTS = (10, 151, 9, 168, 2, 33, 133, 159, 145, 362, 263, 386, 374, 61, 291, 13)
+BODY_POINTS = (11, 12, 13, 14, 15, 16, 23, 24)
+FACE_DIM = len(FACE_POINTS) * 2 + 1
+BODY_DIM = len(BODY_POINTS) * 4 + 1
+VISION_FRAME_DIM = FACE_DIM + BODY_DIM
+REVIEW_ALIGNMENT_SCORE = 0.3  # 低于阈值的样本需人工复核。
 PROSODY_FIELDS = ("duration_s", "pause_before_s", "pause_after_s", "local_words_per_s",
                   "relative_f0_mean_st", "f0_range_st", "f0_slope_st_per_s", "voiced_fraction",
                   "log_rms_mean", "log_rms_range", "log_rms_slope_per_s", "zcr_mean")
 
 
 def configure_cache() -> None:
-    cache = Path(__file__).resolve().parent / "cache"
+    cache = Path(__file__).resolve().parent.parent / "cache"
     for name, suffix in (("HF_HOME", "huggingface"), ("TORCH_HOME", "torch"),
                          ("NLTK_DATA", "nltk_data")):
         os.environ.setdefault(name, str(cache / suffix))
@@ -117,7 +121,7 @@ def text_features(words: list[str], tokenizer, text_model, device: str) -> np.nd
     return result
 
 
-def face_frames(video: Path, model_path: Path) -> tuple[np.ndarray, np.ndarray]:
+def visual_frames(video: Path, face_model: Path, pose_model: Path) -> tuple[np.ndarray, np.ndarray]:
     import cv2
     import mediapipe as mp
 
@@ -129,14 +133,20 @@ def face_frames(video: Path, model_path: Path) -> tuple[np.ndarray, np.ndarray]:
     fps = fps if np.isfinite(fps) and fps > 0 else 30.0
     step = max(1, round(fps / 5.0))
     times, features = [], []
-    landmarker = None
+    face_landmarker = pose_landmarker = None
     try:
-        options = mp.tasks.vision.FaceLandmarkerOptions(
-            base_options=mp.tasks.BaseOptions(model_asset_buffer=model_path.read_bytes()),
+        face_options = mp.tasks.vision.FaceLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_buffer=face_model.read_bytes()),
             running_mode=mp.tasks.vision.RunningMode.IMAGE,
             num_faces=1,
         )
-        landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(options)
+        pose_options = mp.tasks.vision.PoseLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_buffer=pose_model.read_bytes()),
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
+            num_poses=1,
+        )
+        face_landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(face_options)
+        pose_landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(pose_options)
         frame_index = 0
         while True:
             ok, bgr = capture.read()
@@ -145,10 +155,13 @@ def face_frames(video: Path, model_path: Path) -> tuple[np.ndarray, np.ndarray]:
             if frame_index % step == 0:
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                result = landmarker.detect(image)
+                face_result = face_landmarker.detect(image)
+                pose_result = pose_landmarker.detect(image)
                 time_sec = frame_index / fps
-                if result.face_landmarks:
-                    points = result.face_landmarks[0]
+                face = np.zeros(FACE_DIM, dtype=np.float32)
+                if face_result.face_landmarks:
+                    points = face_result.face_landmarks[0]
+                    # 以鼻尖为原点，以双眼间距消除尺度差异。
                     nose = points[1]
                     eye_distance = max(np.hypot(points[33].x - points[263].x,
                                                 points[33].y - points[263].y), 1e-4)
@@ -157,37 +170,64 @@ def face_frames(video: Path, model_path: Path) -> tuple[np.ndarray, np.ndarray]:
                         point = points[point_id]
                         coords.extend(((point.x - nose.x) / eye_distance,
                                        (point.y - nose.y) / eye_distance))
-                    features.append(np.r_[coords, 1.0].astype(np.float32))
-                else:
-                    features.append(np.zeros(35, dtype=np.float32))
+                    face[:] = np.r_[coords, 1.0]
+
+                body = np.zeros(BODY_DIM, dtype=np.float32)
+                if pose_result.pose_landmarks:
+                    points = pose_result.pose_landmarks[0]
+                    # 以双肩中心和肩宽归一化上半身坐标。
+                    left, right = points[11], points[12]
+                    width = max(np.hypot((left.x - right.x) * bgr.shape[1],
+                                         (left.y - right.y) * bgr.shape[0]), 1e-4)
+                    center_x = (left.x + right.x) * bgr.shape[1] / 2
+                    center_y = (left.y + right.y) * bgr.shape[0] / 2
+                    coords = []
+                    for point_id in BODY_POINTS:
+                        point = points[point_id]
+                        coords.extend(((point.x * bgr.shape[1] - center_x) / width,
+                                       (point.y * bgr.shape[0] - center_y) / width,
+                                       point.z * bgr.shape[1] / width,
+                                       float(point.visibility or 0.0)))
+                    body[:] = np.r_[coords, 1.0]
+                features.append(np.r_[face, body])
                 times.append(time_sec)
             frame_index += 1
     finally:
-        if landmarker is not None:
-            landmarker.close()
+        if face_landmarker is not None:
+            face_landmarker.close()
+        if pose_landmarker is not None:
+            pose_landmarker.close()
         capture.release()
     if not features:
         raise ValueError(f"No video frames decoded from {video}")
     return np.asarray(times, dtype=np.float32), np.asarray(features, dtype=np.float32)
 
 
-def pool_intervals(times: np.ndarray, features: np.ndarray, words: list[dict]) -> tuple[np.ndarray, np.ndarray]:
+def pool_intervals(times: np.ndarray, features: np.ndarray, words: list[dict],
+                   nearest_tolerance: float = 0.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     width = features.shape[1] * 2
     pooled = np.zeros((len(words), width), dtype=np.float32)
     valid = np.zeros(len(words), dtype=np.uint8)
+    nearest = np.zeros(len(words), dtype=np.uint8)
     for i, word in enumerate(words):
         start, end = float(word["start"]), float(word["end"])
         selected = (times >= start) & (times < end)
+        if not selected.any() and nearest_tolerance and len(times):
+            gaps = np.maximum(start - times, 0) + np.maximum(times - end, 0)
+            closest = int(np.argmin(gaps))
+            if gaps[closest] <= nearest_tolerance:
+                selected[closest] = True
+                nearest[i] = 1
         if selected.any():
             values = features[selected]
             pooled[i] = np.r_[values.mean(axis=0), values.std(axis=0)]
             valid[i] = 1
-    return pooled, valid
+    return pooled, valid, nearest
 
 
 def prosody_features(times: np.ndarray, features: np.ndarray, words: list[dict],
                      utterance_duration: float) -> np.ndarray:
-    """Summarize word timing, pitch contour, voicing, and energy dynamics."""
+    """汇总词时长、音高、浊音和能量变化。"""
     pitch = np.expm1(features[:, 42]).clip(min=0.0)
     voiced = pitch > 0
     reference_pitch = float(np.median(pitch[voiced])) if voiced.any() else 1.0
@@ -252,19 +292,24 @@ def read_labels(path: Path) -> list[dict]:
     return result
 
 
-def environment(text_model_name: str, face_model_path: Path, output: Path) -> None:
+def environment(text_model_name: str, face_model_path: Path, pose_model_path: Path, output: Path) -> None:
     import cv2
     import mediapipe
     import transformers
     import whisperx
 
     ffmpeg = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, check=True).stdout.splitlines()[0]
-    info = {"text_model": text_model_name, "face_model": str(face_model_path.resolve()),
+    info = {"text_model": text_model_name,
+            "face_model": str(face_model_path.resolve()),
+            "face_model_sha256": hashlib.sha256(face_model_path.read_bytes()).hexdigest(),
+            "pose_model": str(pose_model_path.resolve()),
+            "pose_model_sha256": hashlib.sha256(pose_model_path.read_bytes()).hexdigest(),
             "torch": torch.__version__,
             "transformers": transformers.__version__, "mediapipe": mediapipe.__version__,
             "opencv": cv2.__version__, "whisperx": getattr(whisperx, "__version__", "record package version"),
             "ffmpeg": ffmpeg, "sample_rate_hz": SAMPLE_RATE, "audio_frame_ms": 25,
-            "audio_hop_ms": 10, "video_sample_fps": 5, "face_landmark_ids": FACE_POINTS}
+            "audio_hop_ms": 10, "video_sample_fps": 5, "face_landmark_ids": FACE_POINTS,
+            "pose_landmark_ids": BODY_POINTS, "vision_frame_dim": VISION_FRAME_DIM}
     info["prosody_fields"] = PROSODY_FIELDS
     output.write_text(json.dumps(info, indent=2), encoding="utf-8")
 
@@ -272,17 +317,20 @@ def environment(text_model_name: str, face_model_path: Path, output: Path) -> No
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "outputs" / "features_q1")
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent.parent / "outputs" / "features_q1_face_pose")
     parser.add_argument("--text-model", default="google-bert/bert-base-uncased")
-    parser.add_argument("--face-model", type=Path, default=Path(__file__).parent / "task" / "face_landmarker.task",
-                        help="Path to the MediaPipe Face Landmarker .task model")
+    parser.add_argument("--face-model", type=Path, default=Path(__file__).resolve().parent.parent / "task" / "face_landmarker.task",
+                        help="MediaPipe 人脸关键点模型路径")
+    parser.add_argument("--pose-model", type=Path, default=Path(__file__).resolve().parent.parent / "task" / "pose_landmarker_full.task",
+                        help="MediaPipe 姿态关键点模型路径")
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--max-samples", type=int, default=0, help="0 processes all 100 clips")
-    args = parser.parse_args()
+    parser.add_argument("--max-samples", type=int, default=0, help="0 表示处理全部100条视频")
+    args = parse_config_args(parser, "extract")
     configure_cache()
-    if not args.face_model.is_file():
-        raise FileNotFoundError(f"Face Landmarker model not found: {args.face_model}")
-    root = args.data_root or Path(__file__).resolve().parent / "data"
+    for model_path in (args.face_model, args.pose_model):
+        if not model_path.is_file():
+            raise FileNotFoundError(f"Landmarker model not found: {model_path}")
+    root = args.data_root or Path(__file__).resolve().parent.parent / "data"
     label_files = list(root.rglob("label-100.xlsx"))
     if len(label_files) != 1:
         raise FileNotFoundError(f"Expected one label-100.xlsx under {root}, found {len(label_files)}")
@@ -307,6 +355,7 @@ def main() -> None:
     manifest_path = args.output_dir / "manifest.csv"
     manifest_fields = ["id", "video_id", "clip_id", "seconds", "words", "text_dim", "audio_dim",
                        "prosody_dim", "vision_dim", "mean_alignment_score", "alignment_text_similarity",
+                       "vision_coverage", "face_coverage", "pose_coverage", "nearest_frame_fraction",
                        "status", "error"]
 
     with manifest_path.open("w", newline="", encoding="utf-8-sig") as manifest:
@@ -317,7 +366,7 @@ def main() -> None:
             video = video_root / item["video_id"] / f"{item['clip_id']}.mp4"
             row = {"id": sample_id, "video_id": item["video_id"], "clip_id": item["clip_id"],
                    "text_dim": 768, "audio_dim": 86, "prosody_dim": len(PROSODY_FIELDS),
-                   "vision_dim": 70, "status": "failed", "error": ""}
+                   "vision_dim": VISION_FRAME_DIM * 2, "status": "failed", "error": ""}
             try:
                 if not video.is_file():
                     raise FileNotFoundError(video)
@@ -328,12 +377,19 @@ def main() -> None:
                     raise ValueError("Forced alignment returned no word timestamps")
                 text_values = text_features(words, tokenizer, text_model, device)
                 at, af = audio_frames(audio)
-                vt, vf = face_frames(video, args.face_model)
-                audio_values, audio_mask = pool_intervals(at, af, word_records)
+                vt, vf = visual_frames(video, args.face_model, args.pose_model)
+                audio_values, audio_mask, _ = pool_intervals(at, af, word_records)
                 duration = len(audio) / SAMPLE_RATE
                 prosody = prosody_features(at, af, word_records, duration)
-                visible = vf[:, -1] > 0
-                vision_values, vision_mask = pool_intervals(vt[visible], vf[visible], word_records)
+                face_visible = vf[:, FACE_DIM - 1] > 0
+                pose_visible = vf[:, -1] > 0
+                visible = face_visible | pose_visible
+                vision_values, vision_mask, vision_nearest = pool_intervals(
+                    vt[visible], vf[visible], word_records, nearest_tolerance=0.1)
+                _, face_mask, _ = pool_intervals(vt[face_visible], vf[face_visible], word_records,
+                                                 nearest_tolerance=0.1)
+                _, pose_mask, _ = pool_intervals(vt[pose_visible], vf[pose_visible], word_records,
+                                                 nearest_tolerance=0.1)
                 text_mask = np.linalg.norm(text_values, axis=1) > 0
                 text_canonical = re.sub(r"[^a-z0-9']+", " ", str(item["text"]).lower()).strip()
                 aligned_canonical = re.sub(r"[^a-z0-9']+", " ", " ".join(words).lower()).strip()
@@ -345,13 +401,19 @@ def main() -> None:
                     "prosody": prosody, "prosody_fields": np.asarray(PROSODY_FIELDS, dtype="U"),
                     "utterance_speech_rate_wps": np.asarray(len(words) / max(duration, 1e-6), dtype=np.float32),
                     "text_mask": text_mask.astype(np.uint8), "audio_mask": audio_mask,
-                    "vision_mask": vision_mask,
+                    "vision_mask": vision_mask, "face_mask": face_mask, "pose_mask": pose_mask,
+                    "vision_nearest_mask": vision_nearest,
                 }
                 np.savez_compressed(args.output_dir / f"{item['video_id']}_{item['clip_id']}.npz", **payload)
                 scores = [float(w["score"]) for w in word_records if w.get("score") is not None]
                 row.update({"seconds": round(duration, 4), "words": len(words),
                             "mean_alignment_score": round(float(np.mean(scores)), 4) if scores else "",
-                            "alignment_text_similarity": round(similarity, 4), "status": "ok"})
+                            "alignment_text_similarity": round(similarity, 4),
+                            "vision_coverage": round(float(vision_mask.mean()), 4),
+                            "face_coverage": round(float(face_mask.mean()), 4),
+                            "pose_coverage": round(float(pose_mask.mean()), 4),
+                            "nearest_frame_fraction": round(float(vision_nearest.mean()), 4),
+                            "status": "ok"})
             except Exception as error:
                 row["error"] = f"{type(error).__name__}: {error}"
                 print(f"failed {sample_id}: {row['error']}", file=sys.stderr)
@@ -369,7 +431,7 @@ def main() -> None:
         writer = csv.DictWriter(output, fieldnames=manifest_fields)
         writer.writeheader()
         writer.writerows(review)
-    environment(args.text_model, args.face_model, args.output_dir / "environment.json")
+    environment(args.text_model, args.face_model, args.pose_model, args.output_dir / "environment.json")
     print(f"finished {len(labels)} requested rows; review {manifest_path} for failures and alignment quality")
 
 

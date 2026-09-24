@@ -1,5 +1,3 @@
-"""Loading and validation for the supplied aligned MOSEI features."""
-
 from __future__ import annotations
 
 import pickle
@@ -17,15 +15,15 @@ VISION_DIM = 35
 
 
 def resolve_data_root(path: str | Path | None = None) -> Path:
-    root = Path(path) if path else Path(__file__).resolve().parent / "data"
+    root = Path(path) if path else Path(__file__).resolve().parent.parent / "data"
     if not (root / "附件2-数据集特征文件").is_dir():
         raise FileNotFoundError(f"Expected 附件2-数据集特征文件 under {root}")
     return root
 
 
 def read_pickle(path: str | Path) -> Any:
-    """Read trusted contest pickles, including files written with NumPy 2 paths."""
-    # The supplied files are trusted local inputs; never unpickle arbitrary downloads.
+    """读取题目提供的可信 pickle 文件。"""
+    # 仅加载题目提供的本地文件。
     import numpy as np
 
     if "numpy._core" not in sys.modules:
@@ -60,7 +58,7 @@ def prepare_split(raw: dict[str, Any], *, need_teacher: bool = True) -> dict[str
     if audio.shape[1:] != (SEQ_LEN, AUDIO_DIM) or vision.shape[1:] != (SEQ_LEN, VISION_DIM):
         raise ValueError(f"Expected audio/vision (*, 50, 74/35), got {audio.shape}, {vision.shape}")
     attention = tokens[:, 1, :] > 0
-    content = attention & (tokens[:, 0, :] != 101) & (tokens[:, 0, :] != 102)
+    content = attention & (tokens[:, 0, :] != 0) & (tokens[:, 0, :] != 101) & (tokens[:, 0, :] != 102)
     out = {
         "tokens": tokens,
         "lengths": attention.sum(axis=1).clip(1).astype(np.int64),
@@ -71,6 +69,8 @@ def prepare_split(raw: dict[str, Any], *, need_teacher: bool = True) -> dict[str
         "vision_mask": _feature_mask(vision),
         "classes": np.asarray(raw["classification_labels"], dtype=np.int64),
         "sentiment": np.asarray(raw["regression_labels"], dtype=np.float32),
+        # 样本标识以纯 Python 列表保存，便于错误归因时逐样本落盘。
+        "ids": [str(item) for item in raw.get("id", [""] * len(tokens))],
     }
     if not np.isin(out["classes"], [0, 1, 2]).all():
         raise ValueError("classification_labels must use 0=Negative, 1=Neutral, 2=Positive")
@@ -97,7 +97,7 @@ def load_main(data_root: str | Path | None, split: str, *, need_teacher: bool = 
 
 
 def prepare_sample(raw: dict[str, Any]) -> dict[str, Any]:
-    """Normalize one attached test item to the same 50-position model interface."""
+    """将一条专项样本整理为50位置输入。"""
     if "test" in raw and isinstance(raw["test"], dict):
         raw = raw["test"]
     tokens = np.asarray(raw["text_bert"])
@@ -116,7 +116,7 @@ def prepare_sample(raw: dict[str, Any]) -> dict[str, Any]:
         return np.nan_to_num(value)
 
     attention = tokens[1] > 0
-    content = attention & (tokens[0] != 101) & (tokens[0] != 102)
+    content = attention & (tokens[0] != 0) & (tokens[0] != 101) & (tokens[0] != 102)
     audio, vision = feature("audio", AUDIO_DIM), feature("vision", VISION_DIM)
     item = {
         "tokens": tokens,
