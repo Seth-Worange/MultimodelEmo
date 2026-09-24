@@ -1,0 +1,72 @@
+train:
+  data_root: data
+  device: cuda
+  output_dir: outputs/runs/cica_transformer_s2026
+  seed: 2026
+  batch_size: 32
+  text_mode: bert
+  audio_dynamics: true
+  regression_mode: soft
+  embedding_dim: 96
+  hidden_dim: 64
+  dropout: 0.2
+  class_weight_power: 0.5
+  encoder_type: transformer
+  transformer_layers: 1
+  transformer_heads: 4
+
+  cap_epochs: 25
+  cap_patience: 6
+  cap_lr: 0.001
+  lambda_ca: 0.05
+  ca_temperature: 0.05
+  lambda_uncert: 0.5
+
+  epochs: 60
+  patience: 8
+  lr: 0.001
+  mcp_weight: 0.1
+  mcp_temperature: 0.1
+
+  corruption_probability: 0.8
+  corruption_mode: auto
+  whole_probability: 0.3
+  overlap_probability: 0.5
+  interval_ratios: [0.1, 0.2, 0.4, 0.6]
+  interval_modalities: [audio, vision]
+  local_rate_min: 0.05
+  local_rate_max: 0.45
+  # 与当前 CICA-BiGRU 对照设置保持相同，单独比较编码器结构。
+  text_whole_probability: 0.0
+  text_local_probability: 0.0
+  text_local_rate_min: 0.1
+  text_local_rate_max: 0.4
+  text_missing_start_epoch: 2
+  text_missing_ramp_epochs: 8
+  nontext_loss_boost: 1.0
+
+evaluate:
+  checkpoint:
+    - outputs/runs/cica_transformer_s2026/best.pt
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  output: outputs/runs/cica_transformer_s2026/validation_metrics.json
+
+robustness:
+  checkpoint:
+    - outputs/runs/cica_transformer_s2026/best.pt
+  device: cuda
+  data_root: data
+  batch_size: 64
+  output: outputs/runs/cica_transformer_s2026/robustness.csv
+
+infer:
+  part: q2
+  checkpoint:
+    - outputs/runs/cica_transformer_s2026/best.pt
+  device: cuda
+  data_root: data
+  output_dir: outputs/predictions_cica_transformer
+  max_samples: 0

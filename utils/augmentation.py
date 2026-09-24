@@ -145,6 +145,9 @@ def mask_batch(
     overlap_probability: float = 0.5,
     whole_probability: float = 0.3,
     local_rate_range: tuple[float, float] = (0.05, 0.45),
+    text_whole_probability: float = 0.0,
+    text_local_probability: float = 0.0,
+    text_local_rate_range: tuple[float, float] = (0.1, 0.4),
 ) -> dict[str, torch.Tensor]:
     """按指定形态或 mixed/auto 形态遮蔽模态。
 
@@ -161,6 +164,11 @@ def mask_batch(
         raise ValueError("whole_probability must be in [0, 1]")
     if not 0 <= overlap_probability <= 1:
         raise ValueError("overlap_probability must be in [0, 1]")
+    if (not 0 <= text_whole_probability <= 1 or not 0 <= text_local_probability <= 1
+            or text_whole_probability + text_local_probability > 1):
+        raise ValueError("text missing probabilities must be non-negative and sum to at most 1")
+    if not 0 <= text_local_rate_range[0] <= text_local_rate_range[1] <= 1:
+        raise ValueError("text_local_rate_range must satisfy 0 <= min <= max <= 1")
     if pattern not in PATTERNS:
         raise ValueError(f"pattern must be one of {PATTERNS}")
     if local_rate is not None and not 0 <= local_rate <= 1:
@@ -216,6 +224,15 @@ def mask_batch(
             for name in names:
                 drops = interval_drops(masks[name][row], rng.choice(ratios), location, rng, anchor)
                 _apply_drops(out, masks, row, (name,), drops)
+
+        # 文本缺失独立抽样，方便按课程表逐步增加难度。
+        text_draw = rng.random()
+        if text_draw < text_whole_probability:
+            _apply_whole(out, masks, row, ("text",))
+        elif text_draw < text_whole_probability + text_local_probability:
+            rate = rng.uniform(*text_local_rate_range)
+            drops = local_drops(masks["text"][row], rate, location, rng)
+            _apply_drops(out, masks, row, ("text",), drops)
     return out
 
 

@@ -1,0 +1,25 @@
+# 已有 FUSE 权重的验证对照；不重新训练，不覆盖历史结果。
+evaluate:
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  seed: 2026
+  evaluation_protocol: sample_v2
+  neutral_zero: true
+  output: outputs/diagnostics/bottleneck_audit_20260924/fuse_neutral_sample_v2.json
+  per_sample: outputs/diagnostics/bottleneck_audit_20260924/fuse_neutral_sample_v2.csv
+
+infer:
+  part: q2
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+  device: cuda
+  data_root: data
+  neutral_zero: true
+  output_dir: outputs/predictions_fuse_neutral
+  max_samples: 0

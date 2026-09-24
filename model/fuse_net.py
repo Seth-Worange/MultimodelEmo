@@ -23,6 +23,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from utils.data import AUDIO_DIM, SEQ_LEN, TEXT_DIM, VISION_DIM, VOCAB_SIZE
+from .transformer_encoder import TemporalTransformerEncoder
+from .input_processing import AlignedInputProcessing
 
 MODALITIES = ("text", "audio", "vision")
 FACTORS = ("shared", "private", "noise")
@@ -34,19 +36,26 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (values * weight).sum(dim=1) / weight.sum(dim=1).clamp_min(1.0)
 
 
-class FactorizedAffectiveModel(nn.Module):
+class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
     def __init__(self, embedding_dim: int = 96, hidden_dim: int = 64, text_mode: str = "bert",
                  audio_dynamics: bool = True, regression_mode: str = "soft", dropout: float = 0.2,
-                 tau: float = 0.1, use_availability_embedding: bool = True):
+                 tau: float = 0.1, use_availability_embedding: bool = True,
+                 encoder_type: str = "bigru", transformer_layers: int = 1,
+                 transformer_heads: int = 4, normalize_inputs: bool = False,
+                 pack_aligned_grus: bool = False):
         super().__init__()
         if text_mode not in {"tokens", "bert"}:
             raise ValueError(f"Unknown text mode: {text_mode}")
         if regression_mode not in {"hard", "soft", "signed"}:
             raise ValueError(f"Unknown regression mode: {regression_mode}")
+        if encoder_type not in {"bigru", "transformer"}:
+            raise ValueError(f"Unknown encoder type: {encoder_type}")
         self.architecture = "fuse"
         self.text_mode = text_mode
         self.audio_dynamics = audio_dynamics
         self.regression_mode = regression_mode
+        self.encoder_type = encoder_type
+        self.init_input_processing(normalize_inputs, pack_aligned_grus, AUDIO_DIM, VISION_DIM)
         self.tau = float(tau)
         width = hidden_dim * 2
 
@@ -57,12 +66,20 @@ class FactorizedAffectiveModel(nn.Module):
         else:
             self.text_input = nn.Sequential(nn.Linear(TEXT_DIM, width), nn.LayerNorm(width), nn.GELU())
             text_input_dim = width
-        self.text_gru = nn.GRU(text_input_dim, hidden_dim, batch_first=True, bidirectional=True)
         audio_dim = AUDIO_DIM * (2 if audio_dynamics else 1)
         self.audio_input = nn.Sequential(nn.Linear(audio_dim, width), nn.LayerNorm(width), nn.GELU())
         self.vision_input = nn.Sequential(nn.Linear(VISION_DIM, width), nn.LayerNorm(width), nn.GELU())
-        self.audio_gru = nn.GRU(width, hidden_dim, batch_first=True, bidirectional=True)
-        self.vision_gru = nn.GRU(width, hidden_dim, batch_first=True, bidirectional=True)
+        if encoder_type == "bigru":
+            self.text_gru = nn.GRU(text_input_dim, hidden_dim, batch_first=True, bidirectional=True)
+            self.audio_gru = nn.GRU(width, hidden_dim, batch_first=True, bidirectional=True)
+            self.vision_gru = nn.GRU(width, hidden_dim, batch_first=True, bidirectional=True)
+        else:
+            self.text_transformer = TemporalTransformerEncoder(
+                text_input_dim, hidden_dim, transformer_heads, transformer_layers, dropout)
+            self.audio_transformer = TemporalTransformerEncoder(
+                width, hidden_dim, transformer_heads, transformer_layers, dropout)
+            self.vision_transformer = TemporalTransformerEncoder(
+                width, hidden_dim, transformer_heads, transformer_layers, dropout)
 
         # HMF：每个模态三个子空间投影。
         self.factor_proj = nn.ModuleDict({
@@ -124,19 +141,30 @@ class FactorizedAffectiveModel(nn.Module):
         delta[:, 1:] = (audio[:, 1:] - audio[:, :-1]) * adjacent.unsqueeze(-1).to(audio.dtype)
         return torch.cat((audio, delta), dim=-1)
 
-    def encode(self, tokens, lengths, audio, vision, audio_mask, text_features=None):
+    def encode(self, tokens, lengths, audio, vision, audio_mask, vision_mask, text_features=None):
+        steps = tokens.shape[1]
+        lengths = lengths.clamp(1, steps).to("cpu", dtype=torch.int64)
+        audio, vision = self.prepare_aligned_inputs(audio, vision, audio_mask, vision_mask)
         if self.text_mode == "tokens":
             text_input = self.embedding(tokens)
         else:
             if text_features is None or text_features.shape[:2] != tokens.shape:
                 raise ValueError("bert text_mode requires (batch, steps, 768) text_features")
             text_input = self.text_input(text_features)
-        steps = tokens.shape[1]
-        packed = nn.utils.rnn.pack_padded_sequence(text_input, lengths, batch_first=True, enforce_sorted=False)
-        text_packed, _ = self.text_gru(packed)
-        text_state, _ = nn.utils.rnn.pad_packed_sequence(text_packed, batch_first=True, total_length=steps)
-        audio_state, _ = self.audio_gru(self.audio_input(self._audio_features(audio, audio_mask)))
-        vision_state, _ = self.vision_gru(self.vision_input(vision))
+        if self.encoder_type == "bigru":
+            packed = nn.utils.rnn.pack_padded_sequence(
+                text_input, lengths, batch_first=True, enforce_sorted=False)
+            text_packed, _ = self.text_gru(packed)
+            text_state, _ = nn.utils.rnn.pad_packed_sequence(
+                text_packed, batch_first=True, total_length=steps)
+            audio_state = self.run_aligned_gru(
+                self.audio_gru, self.audio_input(self._audio_features(audio, audio_mask)), lengths)
+            vision_state = self.run_aligned_gru(self.vision_gru, self.vision_input(vision), lengths)
+        else:
+            text_state = self.text_transformer(text_input, tokens.ne(0))
+            audio_state = self.audio_transformer(
+                self.audio_input(self._audio_features(audio, audio_mask)), audio_mask)
+            vision_state = self.vision_transformer(self.vision_input(vision), vision_mask)
         return {"text": text_state, "audio": audio_state, "vision": vision_state}
 
     def factorize(self, encoded, available, tau=None):
@@ -200,7 +228,7 @@ class FactorizedAffectiveModel(nn.Module):
         if steps != SEQ_LEN:
             raise ValueError(f"Expected {SEQ_LEN} sequence positions, got {steps}")
         lengths = lengths.clamp(1, steps).to("cpu", dtype=torch.int64)
-        encoded = self.encode(tokens, lengths, audio, vision, audio_mask, text_features)
+        encoded = self.encode(tokens, lengths, audio, vision, audio_mask, vision_mask, text_features)
         available = {"text": text_mask.bool(), "audio": audio_mask.bool(), "vision": vision_mask.bool()}
         factors, recon, kl, _ = self.factorize(encoded, available)
         aggregated, modality_share = self.dynamic_fusion(factors, available)
@@ -212,7 +240,7 @@ class FactorizedAffectiveModel(nn.Module):
             fused = fused + self.availability_embedding(combined)
 
         valid_steps = torch.stack([available[name] for name in MODALITIES], dim=2).any(dim=2)
-        fused_state, _ = self.fusion_gru(fused)
+        fused_state = self.run_aligned_gru(self.fusion_gru, fused, lengths)
         time_weights = self._masked_softmax(self.pool_score(fused_state).squeeze(-1), valid_steps, dim=1)
         pooled = (fused_state * time_weights.unsqueeze(-1)).sum(dim=1)
         pooled = self.dropout(pooled)
@@ -346,6 +374,8 @@ def fuse_regularization(masked: dict, clean: dict, classes: torch.Tensor, class_
     else:
         stats["cross"] = masked["logits"].new_zeros(())
 
+    stats.setdefault("contrast", masked["logits"].new_zeros(()))
+    stats.setdefault("info", masked["logits"].new_zeros(()))
     stats["total"] = total
     return stats
 

@@ -1,5 +1,3 @@
-"""在验证集或独立测试集上评估模型，可输出逐样本预测用于错误归因。"""
-
 from __future__ import annotations
 
 import argparse
@@ -12,9 +10,9 @@ import torch
 
 from utils.data import load_main
 from utils.config import parse_config_args
-from scripts.infer import load_model
+from scripts.infer import load_model, checkpoint_metadata
 from utils.text import load_text_encoder
-from scripts.train import VIEWS, as_tensors, evaluate, predict_split
+from scripts.train import VIEWS, as_tensors, metrics, predict_split
 
 CSV_FIELDS = ("id", "label_class", "label_strength") + tuple(
     f"{view}_{name}" for view in VIEWS
@@ -47,6 +45,9 @@ def main() -> None:
                         help="输出逐样本预测 CSV 的路径，用于错误归因")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--evaluation-protocol", choices=("legacy_batch", "sample_v2"), default="legacy_batch")
+    parser.add_argument("--neutral-zero", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--drop-modalities", nargs="+", default=None,
                         choices=["text", "audio", "vision"],
                         help="评估时永久遮蔽指定模态（对应训练时的单模态基线）")
@@ -59,22 +60,27 @@ def main() -> None:
                           else "cpu" if args.device == "auto" else args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
-    model = load_model(args.checkpoint, device)
+    model = load_model(args.checkpoint, device, neutral_zero=args.neutral_zero)
     data = as_tensors(load_main(args.data_root, args.split, need_teacher=model.text_mode == "bert"))
     text_encoder = load_text_encoder(device) if model.text_mode == "bert" else None
-    view_metrics = evaluate(model, data, args.batch_size, device, seed=2026,
-                            text_encoder=text_encoder, drop=drop)
-    result = {"split": args.split, "n": len(data["tokens"]), "views": list(VIEWS), **view_metrics}
+    predicted = predict_split(model, data, args.batch_size, device, seed=args.seed,
+                              text_encoder=text_encoder, drop=drop,
+                              evaluation_protocol=args.evaluation_protocol)
+    classes, sentiment = data["classes"].numpy(), data["sentiment"].numpy()
+    view_metrics = {view: metrics(classes, sentiment, values["logits"], values["sentiment"])
+                    for view, values in predicted.items()}
+    result = {"split": args.split, "n": len(data["tokens"]), "views": list(VIEWS),
+              "protocol": {"name": args.evaluation_protocol, "seed": args.seed,
+                           "batch_size": args.batch_size, "drop_modalities": list(drop),
+                           "neutral_zero": args.neutral_zero,
+                           "config": str(args.config.resolve()) if args.config else None},
+              "checkpoints": checkpoint_metadata(args.checkpoint), **view_metrics}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
     print(f"saved {args.output}")
 
     if args.per_sample:
-        predicted = predict_split(model, data, args.batch_size, device,
-                                  text_encoder=text_encoder, seed=2026, drop=drop)
-        classes = data["classes"].numpy()
-        sentiment = data["sentiment"].numpy()
         rows = []
         for index, sample_id in enumerate(data["ids"]):
             row = {"id": sample_id, "label_class": int(classes[index]),

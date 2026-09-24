@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import itertools
 import json
 import math
@@ -14,9 +15,12 @@ import torch
 
 from utils.data import prepare_sample, read_pickle, resolve_data_root
 from utils.config import parse_config_args
+from utils.alignment import alignment_coverage, mapped_word_text
 from utils.text import encode_text, load_text_encoder
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel
+from model.cica_net import CICAAffectiveModel
+from model.input_processing import fill_legacy_input_buffers
 
 LABELS = ("Negative", "Neutral", "Positive")
 MODALITIES = ("text", "audio", "vision")
@@ -45,7 +49,11 @@ class ModelEnsemble(torch.nn.Module):
             sentiment = magnitude * (probabilities[:, 2] - probabilities[:, 0])
         else:
             sentiment = magnitude * (logits.argmax(dim=-1) - 1).to(magnitude.dtype)
-        return {"logits": logits, "magnitude": magnitude, "sentiment": sentiment}
+        result = {"logits": logits, "magnitude": magnitude, "sentiment": sentiment}
+        for key in ("confidence", "uncertainty", "reliability", "modality_weights", "time_weights"):
+            if all(key in output for output in outputs):
+                result[key] = torch.stack([output[key] for output in outputs]).mean(dim=0)
+        return result
 
 
 def build_from_config(config: dict | None) -> torch.nn.Module:
@@ -54,11 +62,31 @@ def build_from_config(config: dict | None) -> torch.nn.Module:
     architecture = config.pop("architecture", "baseline")
     if architecture == "fuse":
         return FactorizedAffectiveModel(**config)
+    if architecture == "cica":
+        return CICAAffectiveModel(**config)
     config.pop("tau", None)
     return AffectiveModel(**config)
 
 
-def load_model(path: Path | list[Path], device: torch.device) -> torch.nn.Module:
+class NeutralZeroModel(torch.nn.Module):
+    """可选决策规则：预测类别为中性时，输出强度为零。"""
+
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+        self.text_mode = model.text_mode
+        self.regression_mode = model.regression_mode
+
+    def forward(self, *inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        output = dict(self.model(*inputs))
+        raw = output["sentiment"]
+        output["raw_sentiment"] = raw
+        output["sentiment"] = torch.where(output["logits"].argmax(-1) == 1, 0.0, raw)
+        return output
+
+
+def load_model(path: Path | list[Path], device: torch.device,
+               neutral_zero: bool = False) -> torch.nn.Module:
     paths = path if isinstance(path, list) else [path]
     if not paths:
         raise ValueError("At least one checkpoint is required")
@@ -70,10 +98,20 @@ def load_model(path: Path | list[Path], device: torch.device) -> torch.nn.Module
         if getattr(model, "fusion", None) == "gate" and "availability_embedding.weight" not in state:
             # 旧权重用零嵌入保持原有预测行为。
             state = {**state, "availability_embedding.weight": model.availability_embedding.weight}
-        model.load_state_dict(state)
+        model.load_state_dict(fill_legacy_input_buffers(model, state))
         models.append(model)
     ensemble = models[0] if len(models) == 1 else ModelEnsemble(models)
+    if neutral_zero:
+        ensemble = NeutralZeroModel(ensemble)
     return ensemble.to(device).eval()
+
+
+def checkpoint_metadata(paths: list[Path]) -> list[dict]:
+    """记录实际权重与结构，避免结果文件对应错实验。"""
+    return [{"path": str(path.resolve()),
+             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+             "model_config": torch.load(path, map_location="cpu", weights_only=True).get("model_config", {})}
+            for path in paths]
 
 
 def tensor_item(item: dict, device: torch.device) -> dict[str, torch.Tensor]:
@@ -198,6 +236,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--neutral-zero", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--part", choices=("q2", "q3"))
     parser.add_argument("--checkpoint", type=Path, action="append",
                         help="可重复指定多个检查点并集成")
@@ -216,7 +255,7 @@ def main() -> None:
                           else "cpu" if args.device == "auto" else args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
-    model = load_model(args.checkpoint, device)
+    model = load_model(args.checkpoint, device, neutral_zero=args.neutral_zero)
     text_encoder = load_text_encoder(device) if model.text_mode == "bert" and args.part == "q3" else None
     files = find_files(root, args.part, args.input_dir)
     if args.max_samples < 0:
@@ -230,6 +269,10 @@ def main() -> None:
                 f"alignment file not found: {args.alignment_file}; run `python -m scripts.align_q3` first")
         alignment = json.loads(args.alignment_file.read_text(encoding="utf-8"))
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {"part": args.part, "neutral_zero": args.neutral_zero,
+                "checkpoints": checkpoint_metadata(args.checkpoint)}
+    (args.output_dir / f"{args.part}_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     predictions, explanations = [], []
 
     for path in files:
@@ -258,6 +301,15 @@ def main() -> None:
             "available_modalities": ",".join(m for m in MODALITIES if item[f"{m}_mask"].any()),
             "missing_modalities": ",".join(m for m in MODALITIES if not item[f"{m}_mask"].any()),
         }
+        if "modality_weights" in output:
+            importance = (output["modality_weights"]
+                          * output["time_weights"].unsqueeze(-1)).sum(dim=1)[0].cpu().numpy()
+            row.update({f"fusion_weight_{name}": float(importance[index])
+                        for index, name in enumerate(MODALITIES)})
+        for key in ("confidence", "uncertainty", "reliability"):
+            if key in output:
+                row.update({f"{key}_{name}": float(output[key][0, index].item())
+                            for index, name in enumerate(MODALITIES)})
         print(f"{args.part}: {sample_id} -> {row['polarity']}, {row['sentiment_strength']:.3f}")
 
         if args.part == "q3":
@@ -268,6 +320,7 @@ def main() -> None:
             row.update({f"shapley_strength_{m}": phi_reg[m] for m in MODALITIES})
             row["main_modality"] = main_modality
             item_alignment = alignment.get(sample_id, {})
+            row.update(alignment_coverage(item_alignment))
             positions = item_alignment.get("positions", [])
             row["evidence_time_status"] = item_alignment.get("status", "position_only")
             for rank, window_row in enumerate(sorted(windows, key=lambda x: x["class_margin_drop"], reverse=True), 1):
@@ -276,7 +329,8 @@ def main() -> None:
                           if positions[i] is not None] if positions else []
                 timed = item_alignment.get("token_match_fraction", 0.0) >= 0.9 and bool(mapped)
                 evidence = {"id": sample_id, "rank_global": rank, **window_row,
-                            "evidence_words": " ".join(dict.fromkeys(p["word"] for p in mapped)) if timed else "",
+                            "evidence_words": mapped_word_text(mapped) if timed else "",
+                            "evidence_scope": row["evidence_scope"],
                             "start_seconds": min(p["start"] for p in mapped) if timed else "",
                             "end_seconds": max(p["end"] for p in mapped) if timed else "",
                             "alignment_status": "mapped" if timed else item_alignment.get("status", "position_only")}

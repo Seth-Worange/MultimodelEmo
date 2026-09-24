@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import random
 import time
@@ -28,17 +29,27 @@ def build_model(args) -> torch.nn.Module:
     if args.architecture == "fuse":
         return FactorizedAffectiveModel(
             text_mode=args.text_mode, audio_dynamics=args.audio_dynamics,
-            regression_mode=args.regression_mode, dropout=args.dropout, tau=args.tau)
+            regression_mode=args.regression_mode, dropout=args.dropout, tau=args.tau,
+            encoder_type=args.encoder_type, transformer_layers=args.transformer_layers,
+            transformer_heads=args.transformer_heads, normalize_inputs=args.normalize_inputs,
+            pack_aligned_grus=args.pack_aligned_grus)
     return AffectiveModel(fusion=args.fusion, text_mode=args.text_mode,
                           audio_dynamics=args.audio_dynamics,
-                          regression_mode=args.regression_mode, dropout=args.dropout)
+                          regression_mode=args.regression_mode, dropout=args.dropout,
+                          encoder_type=args.encoder_type, transformer_layers=args.transformer_layers,
+                          transformer_heads=args.transformer_heads, normalize_inputs=args.normalize_inputs,
+                          pack_aligned_grus=args.pack_aligned_grus)
 
 
 def model_config(args) -> dict:
     """保存到检查点、供 load_model 还原结构的配置。"""
     common = {"architecture": args.architecture, "text_mode": args.text_mode,
               "audio_dynamics": args.audio_dynamics, "regression_mode": args.regression_mode,
-              "dropout": args.dropout}
+              "dropout": args.dropout, "encoder_type": args.encoder_type,
+              "transformer_layers": args.transformer_layers,
+              "transformer_heads": args.transformer_heads,
+              "normalize_inputs": args.normalize_inputs,
+              "pack_aligned_grus": args.pack_aligned_grus}
     if args.architecture == "fuse":
         return {**common, "tau": args.tau}
     return {**common, "fusion": args.fusion}
@@ -156,10 +167,37 @@ def build_view(cpu_batch: dict[str, torch.Tensor], view: str, seed: int,
 
 
 def selection_score(view_metrics: dict[str, dict[str, float]]) -> float:
-    """模型选择分数，越低越好：三个视图的 MAE 与 macro-F1 等权平均。"""
+    """模型选择分数，越低越好：传入视图的 MAE 与 macro-F1 等权平均。"""
     mae = float(np.mean([m["mae"] for m in view_metrics.values()])) / 3.0
     f1 = 1.0 - float(np.mean([m["macro_f1"] for m in view_metrics.values()]))
     return 0.5 * mae + 0.5 * f1
+
+
+def build_fixed_view(cpu_batch: dict, view: str, seed: int,
+                     local_rate_range: tuple[float, float] = LOCAL_RATE_RANGE) -> dict:
+    """按样本标识固定缺失位置，不随批量大小、顺序或训练种子改变。"""
+    if view == "clean":
+        return cpu_batch
+    ids = cpu_batch.get("ids")
+    if ids is None or any(not str(value).strip() for value in ids):
+        raise ValueError("sample_v2 requires nonempty sample IDs")
+    keys = ("tokens", "audio", "vision", "text_mask", "audio_mask", "vision_mask")
+    parts = {key: [] for key in keys}
+    for row, sample_id in enumerate(ids):
+        identity = json.dumps([seed, view, str(sample_id)], ensure_ascii=False).encode("utf-8")
+        sample_seed = int.from_bytes(hashlib.sha256(identity).digest()[:8], "big")
+        sample = make_batch(cpu_batch, torch.tensor([row]))
+        masked = build_view(sample, view, sample_seed, local_rate_range)
+        for key in keys:
+            parts[key].append(masked[key])
+    return {**cpu_batch, **{key: torch.cat(values) for key, values in parts.items()}}
+
+
+def evaluation_seed(args) -> int:
+    """新协议使用独立验证种子，旧协议保留历史行为。"""
+    if args.evaluation_seed is not None:
+        return args.evaluation_seed
+    return 2026 if args.evaluation_protocol == "sample_v2" else args.seed + 9001
 
 
 @torch.no_grad()
@@ -173,31 +211,14 @@ def evaluate(
     views: tuple[str, ...] = VIEWS,
     local_rate_range: tuple[float, float] = LOCAL_RATE_RANGE,
     drop: tuple[str, ...] = (),
+    evaluation_protocol: str = "legacy_batch",
 ) -> dict[str, dict[str, float]]:
-    model.eval()
-    gathered: dict[str, list[np.ndarray]] = {f"{view}_{key}": [] for view in views
-                                             for key in ("logits", "sentiment")}
-    rng = random.Random(seed)
-    for start in range(0, len(data["tokens"]), batch_size):
-        ix = torch.arange(start, min(start + batch_size, len(data["tokens"])))
-        clean_cpu = make_batch(data, ix)
-        if drop:
-            clean_cpu = drop_modalities(clean_cpu, drop)
-        # 先为所有视图取样，保证视图之间互不影响且逐轮可复现。
-        seeds = {view: rng.randrange(2**31) for view in views if view != "clean"}
-        for view in views:
-            cpu_batch = build_view(clean_cpu, view, seeds.get(view, 0), local_rate_range)
-            batch = move_inputs(cpu_batch, device)
-            if (view != "clean" and text_encoder is not None
-                    and not torch.equal(cpu_batch["text_mask"], clean_cpu["text_mask"])):
-                batch["teacher"] = encode_text(batch, text_encoder)
-            output = model(*model_inputs(batch))
-            gathered[f"{view}_logits"].append(output["logits"].cpu().numpy())
-            gathered[f"{view}_sentiment"].append(output["sentiment"].cpu().numpy())
+    predicted = predict_split(model, data, batch_size, device, text_encoder, views,
+                              local_rate_range, seed, drop, evaluation_protocol)
     classes = data["classes"].numpy()
     sentiment = data["sentiment"].numpy()
-    return {view: metrics(classes, sentiment, np.concatenate(gathered[f"{view}_logits"]),
-                          np.concatenate(gathered[f"{view}_sentiment"]))
+    return {view: metrics(classes, sentiment, predicted[view]["logits"],
+                          predicted[view]["sentiment"])
             for view in views}
 
 
@@ -212,8 +233,15 @@ def predict_split(
     local_rate_range: tuple[float, float] = LOCAL_RATE_RANGE,
     seed: int = 0,
     drop: tuple[str, ...] = (),
+    evaluation_protocol: str = "legacy_batch",
 ) -> dict[str, dict[str, np.ndarray]]:
     """逐样本预测，用于错误归因、混淆矩阵与可视化。"""
+    if evaluation_protocol not in ("legacy_batch", "sample_v2"):
+        raise ValueError(f"Unknown evaluation protocol: {evaluation_protocol}")
+    if evaluation_protocol == "sample_v2":
+        ids = [str(value) for value in data.get("ids", [])]
+        if len(ids) != len(data["tokens"]) or len(set(ids)) != len(ids):
+            raise ValueError("sample_v2 requires unique sample IDs")
     model.eval()
     rng = random.Random(seed)
     gathered = {view: {"logits": [], "sentiment": []} for view in views}
@@ -224,7 +252,9 @@ def predict_split(
             clean_cpu = drop_modalities(clean_cpu, drop)
         seeds = {view: rng.randrange(2**31) for view in views if view != "clean"}
         for view in views:
-            cpu_batch = build_view(clean_cpu, view, seeds.get(view, 0), local_rate_range)
+            cpu_batch = (build_fixed_view(clean_cpu, view, seed, local_rate_range)
+                         if evaluation_protocol == "sample_v2" else
+                         build_view(clean_cpu, view, seeds.get(view, 0), local_rate_range))
             batch = move_inputs(cpu_batch, device)
             if (view != "clean" and text_encoder is not None
                     and not torch.equal(cpu_batch["text_mask"], clean_cpu["text_mask"])):
@@ -247,6 +277,8 @@ def main() -> None:
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--evaluation-protocol", choices=("legacy_batch", "sample_v2"), default="legacy_batch")
+    parser.add_argument("--evaluation-seed", type=int, default=None)
     parser.add_argument("--distill-weight", type=float, default=0.1)
     parser.add_argument("--corruption-probability", type=float, default=0.75)
     parser.add_argument("--fusion", choices=("gate", "concat"), default="gate")
@@ -256,6 +288,14 @@ def main() -> None:
                         help="加入相邻有效词位的声学变化特征")
     parser.add_argument("--regression-mode", choices=("signed", "soft", "hard"), default="soft",
                         help="signed 直接回归强度；soft 将强度与类别概率关联")
+    parser.add_argument("--encoder-type", choices=("bigru", "transformer"), default="bigru",
+                        help="三种模态的序列特征编码器")
+    parser.add_argument("--transformer-layers", type=int, default=1)
+    parser.add_argument("--transformer-heads", type=int, default=4)
+    parser.add_argument("--normalize-inputs", action="store_true",
+                        help="用训练集有效位置统计量标准化音频与视觉特征")
+    parser.add_argument("--pack-aligned-grus", action="store_true",
+                        help="按原始对齐序列长度打包音视频和融合GRU")
     parser.add_argument("--class-weight-power", type=float, default=0.5,
                         help="类别权重指数，设为 0 可关闭")
     parser.add_argument("--whole-probability", type=float, default=0.3,
@@ -290,6 +330,8 @@ def main() -> None:
     args = parse_config_args(parser, "train")
     if (args.epochs < 1 or args.batch_size < 1 or args.patience < 1 or args.lr <= 0
             or not 0 <= args.dropout < 1 or args.class_weight_power < 0
+            or args.transformer_layers < 1 or args.transformer_heads < 1
+            or 128 % args.transformer_heads != 0
             or not 0 <= args.whole_probability <= 1
             or not 0 <= args.overlap_probability <= 1
             or any(not 0 < ratio <= 1 for ratio in args.interval_ratios)
@@ -311,6 +353,9 @@ def main() -> None:
     train_data = as_tensors(load_main(args.data_root, "train"))
     valid_data = as_tensors(load_main(args.data_root, "valid"))
     model = build_model(args).to(device)
+    if args.normalize_inputs:
+        model.fit_input_stats(train_data)
+        print("fitted audio/vision normalization from training split only")
     drop = tuple(args.drop_modalities or ())
     if drop:
         print(f"permanently dropping modalities: {', '.join(drop)}")
@@ -372,7 +417,8 @@ def main() -> None:
                         mrc_weight=args.mrc_weight, cross_weight=args.cross_weight)
                     loss = loss + reg["total"]
                     for name in REG_FIELDS:
-                        reg_totals[name] += float(reg[name].detach())
+                        # 某批次没有可用跨模态配对时，该正则项按零计。
+                        reg_totals[name] += float(reg.get(name, reg["total"].new_zeros(())).detach())
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
@@ -380,7 +426,8 @@ def main() -> None:
                 batches += 1
 
             view_metrics = evaluate(
-                model, valid_data, args.batch_size, device, args.seed + 9001, text_encoder,
+                model, valid_data, args.batch_size, device, evaluation_seed(args), text_encoder,
+                evaluation_protocol=args.evaluation_protocol,
                 local_rate_range=(args.local_rate_min, args.local_rate_max), drop=drop)
             score = selection_score(view_metrics)
             row = {"epoch": epoch, "train_loss": total_loss / max(1, batches), "val_score": score}
@@ -413,6 +460,8 @@ def main() -> None:
                     "model_config": {"embedding_dim": 96, "hidden_dim": 64, **model_config(args)},
                     "val_views": view_metrics,
                     "val_score": score,
+                    "evaluation_protocol": args.evaluation_protocol,
+                    "evaluation_seed": evaluation_seed(args),
                 }, args.output_dir / "best.pt")
             else:
                 stale += 1

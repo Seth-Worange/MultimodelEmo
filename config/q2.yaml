@@ -25,6 +25,10 @@ train:
   audio_dynamics: true
   regression_mode: soft
   class_weight_power: 0.5
+  # 三种模态的序列编码器，可选 bigru / transformer。
+  encoder_type: transformer
+  transformer_layers: 1
+  transformer_heads: 4
 
 evaluate:
   checkpoint:

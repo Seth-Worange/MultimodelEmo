@@ -1,3 +1,4 @@
+# P1：只改输入标准化和真实长度打包，保留FUSE其余设置。
 train:
   data_root: data
   device: cuda
@@ -8,10 +9,8 @@ train:
   patience: 8
   seed: 2026
   distill_weight: 0.1
-  output_dir: outputs/runs/fuse_s2026
+  output_dir: outputs/runs/fuse_norm_pack_s2026
   corruption_probability: 0.8
-  # 多尺度连续缺失 + 整段缺失 + 附件3形态的零散短游程，三者混合。
-  # interval_modalities 限定为声画：附件3 实测文本从不缺失，实测该设置优于允许文本缺失。
   corruption_mode: auto
   whole_probability: 0.3
   overlap_probability: 0.5
@@ -19,13 +18,11 @@ train:
   interval_modalities: [audio, vision]
   local_rate_min: 0.05
   local_rate_max: 0.45
-  # FUSE-Net 风格：三因子分解 + 变分重建 + 多因子动态融合（含缺失感知交叉重建）。
   architecture: fuse
   text_mode: bert
   audio_dynamics: true
   regression_mode: soft
   class_weight_power: 0.5
-  # 三种模态的序列编码器，可选 bigru / transformer。
   encoder_type: bigru
   transformer_layers: 1
   transformer_heads: 4
@@ -36,32 +33,35 @@ train:
   dual_weight: 0.05
   mrc_weight: 0.1
   cross_weight: 0.1
+  normalize_inputs: true
+  pack_aligned_grus: true
+  evaluation_protocol: sample_v2
+  evaluation_seed: 2026
 
 evaluate:
   checkpoint:
-    - outputs/runs/fuse_s2026/best.pt
-    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/fuse_norm_pack_s2026/best.pt
   split: valid
   data_root: data
   device: cuda
   batch_size: 64
-  output: outputs/runs/fuse_availability/validation_metrics.json
+  seed: 2026
+  evaluation_protocol: sample_v2
+  output: outputs/runs/fuse_norm_pack_s2026/validation_metrics.json
 
 robustness:
   checkpoint:
-    - outputs/runs/fuse_s2026/best.pt
-    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/fuse_norm_pack_s2026/best.pt
   device: cuda
   data_root: data
   batch_size: 64
-  output: outputs/runs/fuse_availability/robustness.csv
+  output: outputs/runs/fuse_norm_pack_s2026/robustness.csv
 
 infer:
   part: q2
   checkpoint:
-    - outputs/runs/fuse_s2026/best.pt
-    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/fuse_norm_pack_s2026/best.pt
   device: cuda
   data_root: data
-  output_dir: outputs/predictions_fuse
+  output_dir: outputs/predictions_fuse_norm_pack
   max_samples: 0

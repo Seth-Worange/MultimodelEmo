@@ -11,6 +11,7 @@ import torch
 
 from utils.data import prepare_sample, read_pickle, resolve_data_root
 from utils.config import parse_config_args
+from utils.alignment import alignment_coverage
 from scripts.features_q1 import align_words, configure_cache, decode_audio
 
 
@@ -73,6 +74,7 @@ def main() -> None:
             "words": [{"word": word_text[i], "start": float(word["start"]), "end": float(word["end"])}
                       for i, word in enumerate(words)],
         }
+        mapping[sample_id].update(alignment_coverage(mapping[sample_id]))
         print(f"{sample_id}: {len(words)} words, token_match={match_fraction:.3f}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

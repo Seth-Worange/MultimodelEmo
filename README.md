@@ -24,7 +24,7 @@
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m pip install -r requirements-q1.txt
 ```
 
-默认数据路径为 `data`，人脸和姿态模型分别位于 `task\face_landmarker.task`、`task\pose_landmarker_full.task`。参数集中放在 `config\q1.yaml`、`config\q2.yaml`、`config\q3.yaml`；命令行参数可覆盖配置值。BERT、语音对齐权重和 NLTK 数据默认缓存在 `cache`；只对题目提供的可信 pickle 文件使用 `pickle` 加载器。
+默认数据路径为 `data`，人脸和姿态模型分别位于 `task\face_landmarker.task`、`task\pose_landmarker_full.task`。参数集中放在 `config\q1.yaml`、`config\q2.yaml`、`config\q2_fuse.yaml`、`config\q2_cica.yaml`、`config\q2_cica_transformer.yaml`、`config\q3.yaml`；命令行参数可覆盖配置值。BERT、语音对齐权重和 NLTK 数据默认缓存在 `cache`；只对题目提供的可信 pickle 文件使用 `pickle` 加载器。
 
 ## 问题1：处理附件1的全部100条视频
 
@@ -49,7 +49,27 @@
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config\q2_fuse.yaml --seed 2027 --output-dir outputs\runs\fuse_s2027
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config\q2_fuse.yaml
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.robustness --config config\q2_fuse.yaml
+# CICA 启发的两阶段方案：先单模态 CAP，再冻结编码器训练置信度融合
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train_cica --config config\q2_cica.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train_cica --config config\q2_cica.yaml --seed 2027 --output-dir outputs\runs\cica_s2027
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config\q2_cica.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.robustness --config config\q2_cica.yaml
+# CICA Transformer 对照：仅替换三种模态的 BiGRU 编码器
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train_cica --config config\q2_cica_transformer.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config\q2_cica_transformer.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.robustness --config config\q2_cica_transformer.yaml
 ```
+
+`encoder_type` 在门控基线、FUSE 和 CICA 三种模型配置中都可选 `bigru` 或 `transformer`。Transformer 使用一层、4头和可学习时间位置编码作为小样本起点；融合层 BiGRU 保持不变。也可只通过命令行覆盖，例如 `--encoder-type transformer`。基线与 FUSE 对照命令如下，验证时直接传入对应检查点：
+
+```powershell
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config\q2.yaml --encoder-type transformer --output-dir outputs\runs\baseline_transformer_s2026
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --checkpoint outputs\runs\baseline_transformer_s2026\best.pt --split valid --data-root data --device cuda --output outputs\runs\baseline_transformer_s2026\validation_metrics.json
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config\q2_fuse.yaml --encoder-type transformer --output-dir outputs\runs\fuse_transformer_s2026
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --checkpoint outputs\runs\fuse_transformer_s2026\best.pt --split valid --data-root data --device cuda --output outputs\runs\fuse_transformer_s2026\validation_metrics.json
+```
+
+`train_cica.py` 是独立实验入口，不改写门控基线与 FUSE 配置。阶段一将每个模态的分类、连续强度、置信度和不确定性头与对应序列编码器一起训练，阶段二加载 `cap_best.pt` 并冻结这些单模态分支，仅训练可靠性调制门控和融合预测层。训练会额外保存 `cap_metrics.csv`；最终 `best.pt` 可交给现有 `evaluate.py`、`robustness.py` 和 `infer.py` 使用。此方案借鉴 [CICA（CVPR 2026）](https://openaccess.thecvf.com/content/CVPR2026/html/Jiang_CICA_Coupling_Confidence-Aware_Pretraining_with_Confidence-Informed_Attention_for_Robust_Multimodal_CVPR_2026_paper.html)，是针对本题三分类与连续情感分数任务的适配实现，不是对论文网络的逐层复现；附件3/4仍只用于推理，不参加训练、伪标签或选型。
 
 模型用768维上下文BERT词特征、音频和视觉序列作为输入。附件2已有的 `text` 与本地 `google-bert/bert-base-uncased` 从 `text_bert` 重新编码的结果一致（已逐元素核对，cosine=1.0、MAE=0.0）；附件3没有 `text` 时，推理代码直接用 `text_bert` 的 token id 通过该冻结BERT生成特征，不读取标签，也不要求 `text` 字段。实际检查的附件3中30条文本都可用，29条的音频与视觉逐词掩码完全相同。BERT权重需在 `cache\huggingface` 可用。
 
@@ -123,6 +143,8 @@
 
 ```powershell
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q2.yaml
+# CICA 方案训练完成后，可通过对应配置预测并输出置信度/不确定性/融合权重
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q2_cica.yaml
 ```
 
 附件4预测及解释（先生成词到时间映射）：
@@ -139,6 +161,32 @@
 新增脚本 `scripts\figures_q1.py` 生成问题1的典型样本对齐图与覆盖率汇总表，见下节。
 
 ## 目录与数据边界
+
+### 2026-09-24 瓶颈诊断与固定验证
+
+当前候选的可追溯验证比较和下一轮实验计划见 [bottleneck_analysis.md](bottleneck_analysis.md)；历史修订见 [experiment.md](experiment.md)。注意旧 `availability/validation_metrics.json` 对应Transformer单模型，不能代表当前BiGRU集成。
+
+新增 `sample_v2` 按样本ID固定缺失位置；训练入口 `scripts.train`、`scripts.train_cica` 可加 `--evaluation-protocol sample_v2 --evaluation-seed 2026`，并使用新的输出目录。旧默认 `legacy_batch` 保留用于复现，新旧缺失视图的数值不可混用；完整输入指标可直接对照。
+
+已有FUSE权重的可选中性强度置零评估：
+
+```powershell
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config/q2_fuse_neutral.yaml
+```
+
+验证集clean MAE由0.5729降至0.5628，分类指标不变，Pearson由0.6737略降至0.6704。该配置只增加显式输出规则，不重训。结果与逐样本预测写入 `outputs/diagnostics/bottleneck_audit_20260924/`；不覆盖历史评估。
+
+新Q3输出的 `evidence_scope` 和 `aligned_word_coverage` 说明模型可解释的词覆盖范围。`token_match_fraction=1` 不能代表完整视频覆盖或声学对齐准确，已有映射在下一次推理时也会生成覆盖字段。
+
+### P1 音视频标准化与GRU打包对照
+
+逐特征标准化使用训练集有效位置拟合，统计量写入checkpoint；打包使用原始文本attention长度。仅标准化在seed2026、2027、2028三组配对训练中均优于sample_v2控制；GRU打包单项退化。标准化仍未超过历史FUSE分类最优，因此保留为候选配置，不替换原默认值。训练配置、checkpoint和逐视图指标位于 `outputs/diagnostics/bottleneck_audit_20260924/`。
+
+```powershell
+# 继续做配对复核时，两组使用相同的新seed和独立输出目录。
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config/q2_fuse_samplev2_control.yaml --seed 2029 --output-dir outputs/runs/fuse_control_s2029
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config/q2_fuse_norm_only.yaml --seed 2029 --output-dir outputs/runs/fuse_norm_only_s2029
+```
 
 - `config/`：问题1、2、3的 YAML 配置。
 - `model/`：情感模型网络。
