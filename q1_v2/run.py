@@ -132,6 +132,7 @@ def process_sample(
             duration_s=media.duration_s,
             timeout_s=config.mfa_timeout_s,
             temporary_directory=Path(config.mfa_work_root) if config.mfa_work_root else None,
+            beam=config.mfa_beam,
         )
         current_stage = "text"
         text = extract_text_features(
@@ -231,12 +232,14 @@ def build_parser() -> argparse.ArgumentParser:
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--max-samples", type=int)
     selection.add_argument("--all", action="store_true")
+    selection.add_argument("--sample-id", action="append", help="Process one or more exact video_id__clip_id values")
     parser.add_argument("--visual-fps", type=float, choices=(5.0, 10.0), default=5.0)
     parser.add_argument("--face-model", type=Path, default=None)
     parser.add_argument("--text-model", default="google-bert/bert-base-uncased")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--mfa-acoustic-model", default="english_us_arpa")
     parser.add_argument("--mfa-dictionary", default="english_us_arpa")
+    parser.add_argument("--mfa-beam", type=int, default=None, help="Optional diagnostic beam width for MFA align_one")
     parser.add_argument(
         "--mfa-root-dir", type=Path, default=None,
         help="ASCII-only MFA model/config root (sets MFA_ROOT_DIR for child processes)",
@@ -255,6 +258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.max_samples is not None and args.max_samples <= 0:
         raise SystemExit("--max-samples must be positive")
+    if args.mfa_beam is not None and args.mfa_beam <= 0:
+        raise SystemExit("--mfa-beam must be positive")
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     mfa_work_dir = (
@@ -290,6 +295,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         text_model=args.text_model,
         mfa_acoustic_model=args.mfa_acoustic_model,
         mfa_dictionary=args.mfa_dictionary,
+        mfa_beam=args.mfa_beam,
         mfa_root_dir=str(mfa_root_dir) if mfa_root_dir is not None else None,
         mfa_work_root=str(mfa_work_dir),
     )
@@ -305,7 +311,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError(
             f"--all refuses a noncanonical dataset: expected {config.expected_sample_count}, found {len(records)}"
         )
-    selected = records if args.all else records[:args.max_samples]
+    if args.sample_id:
+        requested = set(args.sample_id)
+        selected = [record for record in records if record.sample_id in requested]
+        missing = requested - {record.sample_id for record in selected}
+        if missing:
+            raise ValueError(f"Unknown --sample-id values: {sorted(missing)}")
+    else:
+        selected = records if args.all else records[:args.max_samples]
     write_json(output_dir / "run_selection.json", {
         "selected_sample_ids": [record.sample_id for record in selected],
         "selected_count": len(selected),

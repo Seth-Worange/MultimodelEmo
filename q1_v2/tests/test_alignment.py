@@ -4,12 +4,29 @@ import math
 import unittest
 from pathlib import Path
 
-from q1_v2.alignment import MFAWord, normalize_word, parse_mfa_json, remap_mfa_words
+from q1_v2.alignment import MFAWord, locate_mfa_unknowns, normalize_word, parse_mfa_json, remap_mfa_words
 from q1_v2.io_utils import write_json
 from q1_v2.data_loader import split_original_words
 
 
 class AlignmentTests(unittest.TestCase):
+    def test_unknown_is_located_by_unique_anchors_without_assigning_time(self) -> None:
+        original = split_original_words("Key Polymer brings")
+        mfa = [MFAWord("key", 0, .1), MFAWord("<unk>", .1, .4), MFAWord("brings", .4, .8)]
+        unknowns = locate_mfa_unknowns(original, mfa)
+        self.assertEqual(list(unknowns), [1])
+        mapped = remap_mfa_words(
+            "sample", original, mfa,
+            wav_origin_media_s=0, timeline_origin_media_s=0, duration_s=1,
+        )
+        self.assertEqual(mapped[1].alignment_mask, 0)
+        self.assertTrue(math.isnan(mapped[1].start_s))
+
+    def test_ambiguous_unknown_does_not_claim_an_original_word(self) -> None:
+        original = split_original_words("one alpha beta two")
+        mfa = [MFAWord("one", 0, .1), MFAWord("<unk>", .1, .5), MFAWord("two", .5, .8)]
+        self.assertEqual(locate_mfa_unknowns(original, mfa), {})
+
     def test_curly_apostrophe_normalizes_for_matching(self) -> None:
         self.assertEqual(normalize_word("They\u2019ve"), "they've")
 

@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mfa-dictionary", default="english_us_arpa")
     parser.add_argument("--mfa-root-dir", type=Path, default=None)
     parser.add_argument("--timeout-s", type=int, default=900)
+    parser.add_argument("--beam", type=int, default=None)
     parser.add_argument("--mfa-work-dir", type=Path, default=None)
     return parser
 
@@ -77,6 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         duration_s=media.duration_s,
         timeout_s=args.timeout_s,
         temporary_directory=mfa_work_dir,
+        beam=args.beam,
     )
     summary = {
         "sample_id": record.sample_id,

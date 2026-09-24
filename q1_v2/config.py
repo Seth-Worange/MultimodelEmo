@@ -36,6 +36,7 @@ class Q1Config:
     mfa_dictionary: str = "english_us_arpa"
     mfa_output_format: str = "json"
     mfa_timeout_s: int = 900
+    mfa_beam: int | None = None
     mfa_root_dir: str | None = None
     mfa_work_root: str | None = None
     face_model_path: str | None = None
@@ -68,6 +69,9 @@ class Q1Config:
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
+        if value["mfa_beam"] is None:
+            # Preserve pre-round-3 fingerprints for unchanged MFA defaults.
+            value.pop("mfa_beam")
         value["selected_landmarks"] = list(self.selected_landmarks)
         return value
 

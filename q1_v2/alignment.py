@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .data_loader import OriginalWord
-from .io_utils import write_csv, write_json
+from .io_utils import sha256_file, write_csv, write_json
 from .media import wav_to_sample_time
 
 
@@ -194,6 +194,36 @@ def _sequence_mapping(original: list[str], aligned: list[str]) -> dict[int, int]
     return mapping
 
 
+def locate_mfa_unknowns(
+    original_words: list[OriginalWord], mfa_words: list[MFAWord],
+) -> dict[int, MFAWord]:
+    """Link an <unk> to an original position only when its anchors are unique.
+
+    This is diagnostic evidence, not a word timing assignment.
+    """
+    normalized = [normalize_word(word.text) for word in original_words]
+    positions = [i for i, value in enumerate(normalized) if value]
+    matched = _sequence_mapping(
+        [normalized[i] for i in positions],
+        [normalize_word(word.label) for word in mfa_words],
+    )
+    anchors = sorted((positions[i], j) for i, j in matched.items())
+    matched_original = {i for i, _ in anchors}
+    located: dict[int, MFAWord] = {}
+    for mfa_index, word in enumerate(mfa_words):
+        if word.label.lower() != "<unk>":
+            continue
+        before = max((i for i, j in anchors if j < mfa_index), default=-1)
+        after = min((i for i, j in anchors if j > mfa_index), default=len(original_words))
+        candidates = [
+            i for i in range(before + 1, after)
+            if normalized[i] and i not in matched_original and i not in located
+        ]
+        if len(candidates) == 1:
+            located[candidates[0]] = word
+    return located
+
+
 def remap_mfa_words(
     sample_id: str,
     original_words: list[OriginalWord],
@@ -305,7 +335,16 @@ def probe_mfa(acoustic_model: str, dictionary: str) -> dict[str, Any]:
         return result
     version = _run_probe([executable, "version"])
     acoustic = _probe_installed_model(executable, "acoustic", acoustic_model)
-    lexicon = _probe_installed_model(executable, "dictionary", dictionary)
+    dictionary_path = Path(dictionary)
+    if dictionary_path.is_file():
+        lexicon = {
+            "ok": dictionary_path.suffix.lower() == ".dict",
+            "requested_name": str(dictionary_path.resolve()),
+            "validation_method": "existing local .dict file; validated by align_one",
+            "sha256": sha256_file(dictionary_path),
+        }
+    else:
+        lexicon = _probe_installed_model(executable, "dictionary", dictionary)
     result.update({"version": version, "acoustic_model": acoustic, "dictionary": lexicon})
     result["available"] = bool(version["ok"] and acoustic["ok"] and lexicon["ok"])
     if not acoustic["ok"]:
@@ -329,6 +368,7 @@ def run_mfa_alignment(
     duration_s: float,
     timeout_s: int = 900,
     temporary_directory: Path | None = None,
+    beam: int | None = None,
 ) -> AlignmentResult:
     """Invoke the verified MFA 3.x ``align_one`` CLI and retain raw output."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -358,10 +398,19 @@ def run_mfa_alignment(
     native_raw = native_attempt / "mfa_raw.json"
     shutil.copy2(wav_path, native_wav)
     native_text.write_text(original_text, encoding="utf-8")
+    native_dictionary = dictionary
+    if Path(dictionary).is_file():
+        native_dictionary_path = native_attempt / "supplemented.dict"
+        shutil.copy2(dictionary, native_dictionary_path)
+        native_dictionary = str(native_dictionary_path)
     command = [
-        executable, "align_one", str(native_wav), str(native_text), dictionary,
+        executable, "align_one", str(native_wav), str(native_text), native_dictionary,
         acoustic_model, str(native_raw), "--output_format", "json",
     ]
+    if beam is not None:
+        if beam <= 0:
+            raise ValueError("beam must be positive")
+        command.extend(["--beam", str(beam)])
     command.extend(["--temporary_directory", str(native_attempt / "temp")])
     write_json(output_dir / "mfa_native_work.json", {
         "source_wav_sample_relative_path": wav_path.name,

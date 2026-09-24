@@ -148,3 +148,32 @@ python -m unittest discover -s q1_v2\tests -v
 ```
 
 合成测试与附件 1 真实实验严格分开。测试覆盖 PTS/time_base、音视频帧区间关联、短词无视觉帧、无人脸与无采样帧区分、失败保词、异常时间戳、Padding/mask、Transformers 5 BERT 特殊 token 兼容、独立 F0 时间轴和 NPZ 维度。
+
+## 第三轮：未知词、5/10 FPS 对照与精简导出
+
+真实执行记录、统计数值、MFA/CMU 发音来源和各输出路径见 [ROUND3_REPORT.md](ROUND3_REPORT.md)。入口：
+
+```powershell
+python -m q1_v2.round3 --phase dictionary --baseline-root outputs\q1_v2_smoke `
+  --output-dir outputs\q1_v2_round3 --base-dictionary D:\q1_v2_mfa_root\pretrained_models\dictionary\english_us_arpa.dict
+python -m q1_v2.round3 --phase realign --baseline-root outputs\q1_v2_smoke `
+  --output-dir outputs\q1_v2_round3 --mfa-root-dir D:\q1_v2_mfa_root --mfa-work-dir D:\q1_v2_mfa_work
+python -m q1_v2.round3 --phase visual --baseline-root outputs\q1_v2_smoke `
+  --output-dir outputs\q1_v2_round3 --face-model outputs\q1_v2_round2\models\face_landmarker.task
+python -m q1_v2.round3 --phase fusion --baseline-root outputs\q1_v2_smoke `
+  --output-dir outputs\q1_v2_round3
+python -m q1_v2.round3 --phase review --baseline-root outputs\q1_v2_smoke `
+  --output-dir outputs\q1_v2_round3
+python -m q1_v2.round3 --phase verify --baseline-root outputs\q1_v2_smoke `
+  --output-dir outputs\q1_v2_round3
+```
+
+`visual_5fps/`、`visual_10fps/` 复用同一份逐词 MFA CSV；`revised_fused_5fps/`、`revised_fused_10fps/` 用未变化的文本向量、原始声学帧和新版词时间重新组织三模态结果。旧基线保留在 `q1_v2_smoke/`。新 MFA 边界包括已补发音的两个词均须人工听辨，`word_review_reference_template.csv` 可直接填写标注人、人工起止时间和无法确定状态。
+
+```powershell
+python -m q1_v2.submission_export --source-root outputs\q1_v2_round3\revised_fused_10fps `
+  --output-dir <独立精简导出路径> --sample-id=-3g5yACwYnA__13 `
+  --sample-id=-3g5yACwYnA__2 --sample-id=-3g5yACwYnA__3
+```
+
+导出每条样本仅保存一份含词级和帧级三模态特征、时间、掩码与原始帧索引的 `fused_features.npz`，另附词帧对应元数据、逐词对齐 CSV、视频哈希和来源证明；完整 WAV、MFA 日志、模型权重和各模态重复 NPZ 留在研究输出中。当前体积报告仅适用于已跑样本，不代表 100 条一定小于 50 MB。

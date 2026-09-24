@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import csv
+import argparse
+import math
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import numpy as np
 
-from .data_loader import MANIFEST_FIELDS, SampleRecord
+from .alignment import locate_mfa_unknowns, parse_mfa_output
+from .data_loader import MANIFEST_FIELDS, SampleRecord, load_samples, split_original_words
 from .io_utils import directory_size, read_json, write_csv, write_json
 
 
@@ -34,6 +37,184 @@ REVIEW_FIELDS = (
 MANUAL_FIELDS = (
     "sample_id", "word_index", "reference_start_s", "reference_end_s", "reviewer_id",
 )
+WORD_REVIEW_FIELDS = (
+    "sample_id", "word_index", "original_word", "start_s", "end_s",
+    "alignment_mask", "audio_mask", "visual_mask", "issue_type",
+    "review_priority", "review_reason", "mfa_unknown_start_s", "mfa_unknown_end_s",
+    "visual_frame_count", "visual_status", "revised_start_s", "revised_end_s",
+    "revised_alignment_mask", "manual_boundary_review_status",
+    "realignment_max_boundary_shift_s", "source_variant",
+)
+MANUAL_TEMPLATE_FIELDS = (
+    "sample_id", "word_index", "original_word", "reference_start_s",
+    "reference_end_s", "reviewer_id", "boundary_status", "review_note",
+    "automatic_revised_start_s", "automatic_revised_end_s",
+)
+
+
+def word_review_rows(sample_dir: Path) -> list[dict[str, Any]]:
+    """Generate word-level issues independently of sample-level thresholds."""
+    fused_path = sample_dir / "fused_features.npz"
+    raw_path = sample_dir / "mfa_raw.json"
+    if not fused_path.is_file():
+        failed_path = sample_dir / "_FAILED.json"
+        input_path = sample_dir / "sample_input.json"
+        if not failed_path.is_file() or not input_path.is_file():
+            return []
+        failed = read_json(failed_path)
+        sample = read_json(input_path)
+        reason = f"{failed.get('failure_stage', 'unknown_stage')}: {failed.get('error', 'processing_failed')}"
+        return [{
+            "sample_id": sample["sample_id"], "word_index": index,
+            "original_word": word, "start_s": "", "end_s": "",
+            "alignment_mask": 0 if failed.get("failure_stage") == "alignment" else "",
+            "audio_mask": "", "visual_mask": "",
+            "issue_type": "processing_failed | word_time_missing" if failed.get("failure_stage") == "alignment" else "processing_failed",
+            "review_priority": "high", "review_reason": reason,
+            "visual_frame_count": "", "visual_status": "not_evaluated",
+        } for index, word in enumerate(sample["original_words"])]
+    with np.load(fused_path, allow_pickle=False) as arrays:
+        sample_id = str(arrays["sample_id"].item())
+        words = arrays["original_words"].astype(str).tolist()
+        starts = arrays["word_start_s"].copy()
+        ends = arrays["word_end_s"].copy()
+        alignment = arrays["alignment_mask"].astype(bool).copy()
+        audio = arrays["audio_mask"].astype(bool).copy()
+        visual = arrays["visual_mask"].astype(bool).copy()
+        frame_counts = arrays["visual_word_frame_counts"].copy()
+    metadata = read_json(sample_dir / "fused_metadata.json")
+    visual_statuses = metadata.get("visual_word_status", [])
+    unknowns = {}
+    if raw_path.is_file():
+        transcript_path = sample_dir / "transcript_original.txt"
+        original_text = (
+            transcript_path.read_text(encoding="utf-8") if transcript_path.is_file()
+            else read_json(sample_dir / "sample_input.json")["text"]
+        )
+        original_words = split_original_words(original_text)
+        if [word.text for word in original_words] != words:
+            raise ValueError(f"Original word mismatch in {sample_dir}")
+        unknowns = locate_mfa_unknowns(original_words, parse_mfa_output(raw_path))
+    rows: list[dict[str, Any]] = []
+    for index, original_word in enumerate(words):
+        issues: list[str] = []
+        reasons: list[str] = []
+        if index in unknowns:
+            issues.append("mfa_unknown")
+            reasons.append("MFA emitted <unk> at this uniquely anchored original position")
+        if not alignment[index]:
+            issues.append("word_time_missing")
+            reasons.append("Original word has no accepted MFA interval")
+        elif int(frame_counts[index]) == 0:
+            issues.append("no_video_frame_in_interval")
+            reasons.append("No actually sampled video frame fell within [start,end)")
+        elif not visual[index]:
+            issues.append("sampled_frames_without_valid_face")
+            reasons.append("Video frames exist in the word interval, but no valid face feature was extracted")
+        if alignment[index] and float(ends[index] - starts[index]) > 1.0:
+            issues.append("long_duration_review")
+            reasons.append("Duration exceeds 1 s; review suggested, not an error verdict")
+        if not issues:
+            continue
+        unknown = unknowns.get(index)
+        rows.append({
+            "sample_id": sample_id, "word_index": index,
+            "original_word": original_word,
+            "start_s": float(starts[index]) if alignment[index] else "",
+            "end_s": float(ends[index]) if alignment[index] else "",
+            "alignment_mask": int(alignment[index]),
+            "audio_mask": int(audio[index]), "visual_mask": int(visual[index]),
+            "issue_type": " | ".join(issues),
+            "review_priority": "high" if "mfa_unknown" in issues or "word_time_missing" in issues else "medium" if ("no_video_frame_in_interval" in issues or "sampled_frames_without_valid_face" in issues) else "low",
+            "review_reason": " | ".join(reasons),
+            "mfa_unknown_start_s": unknown.start_s if unknown else "",
+            "mfa_unknown_end_s": unknown.end_s if unknown else "",
+            "visual_frame_count": int(frame_counts[index]),
+            "visual_status": visual_statuses[index] if index < len(visual_statuses) else "",
+            "source_variant": "fused_output",
+        })
+    return rows
+
+
+def write_word_review_reports(
+    sample_dirs: Sequence[Path], output_dir: Path,
+    *, revised_alignment_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    rows = [row for sample_dir in sample_dirs for row in word_review_rows(sample_dir)]
+    if revised_alignment_root is not None:
+        rows_by_key = {(str(row["sample_id"]), int(row["word_index"])): row for row in rows}
+        revised_by_sample: dict[str, dict[int, dict[str, str]]] = {}
+        for sample_dir in sample_dirs:
+            sample_id = sample_dir.name
+            path = revised_alignment_root / "samples" / sample_id / "word_alignment.csv"
+            if path.is_file():
+                with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                    revised_by_sample[sample_id] = {
+                        int(item["word_index"]): item for item in csv.DictReader(handle)
+                    }
+                with np.load(sample_dir / "fused_features.npz", allow_pickle=False) as arrays:
+                    words = arrays["original_words"].astype(str).tolist()
+                    old_starts = arrays["word_start_s"].copy()
+                    old_ends = arrays["word_end_s"].copy()
+                    old_alignment = arrays["alignment_mask"].astype(bool).copy()
+                    old_audio = arrays["audio_mask"].copy()
+                    old_visual = arrays["visual_mask"].copy()
+                for index, revised in revised_by_sample[sample_id].items():
+                    if index >= len(words) or revised["original_word"] != words[index]:
+                        raise ValueError("Revised alignment changed original word order")
+                    if not old_alignment[index] or revised["alignment_mask"] != "1":
+                        continue
+                    shift = max(
+                        abs(float(old_starts[index]) - float(revised["start_s"])),
+                        abs(float(old_ends[index]) - float(revised["end_s"])),
+                    )
+                    if shift <= 0.2:
+                        continue
+                    key = (sample_id, index)
+                    if key not in rows_by_key:
+                        row = {
+                            "sample_id": sample_id, "word_index": index,
+                            "original_word": words[index],
+                            "start_s": float(old_starts[index]),
+                            "end_s": float(old_ends[index]),
+                            "alignment_mask": 1,
+                            "audio_mask": int(old_audio[index]),
+                            "visual_mask": int(old_visual[index]),
+                            "issue_type": "", "review_priority": "high",
+                            "review_reason": "", "visual_frame_count": "",
+                            "visual_status": "baseline masks; revised features not yet aggregated",
+                        }
+                        rows.append(row)
+                        rows_by_key[key] = row
+                    row = rows_by_key[key]
+                    row["issue_type"] = (row["issue_type"] + " | realignment_boundary_shift").strip(" |")
+                    row["review_priority"] = "high"
+                    row["review_reason"] = (
+                        str(row["review_reason"]) + f" | Re-alignment moved a boundary by {shift:.3f} s; manual review required"
+                    ).strip(" |")
+                    row["realignment_max_boundary_shift_s"] = shift
+        for row in rows:
+            revised = revised_by_sample.get(str(row["sample_id"]), {}).get(int(row["word_index"]))
+            if revised:
+                if revised["original_word"] != row["original_word"]:
+                    raise ValueError("Revised alignment changed original word order")
+                row["revised_start_s"] = revised["start_s"]
+                row["revised_end_s"] = revised["end_s"]
+                row["revised_alignment_mask"] = revised["alignment_mask"]
+                row["manual_boundary_review_status"] = "pending"
+    rows.sort(key=lambda row: (str(row["sample_id"]), int(row["word_index"])))
+    write_csv(output_dir / "word_review_candidates.csv", rows, WORD_REVIEW_FIELDS)
+    template = [
+        {"sample_id": row["sample_id"], "word_index": row["word_index"],
+         "original_word": row["original_word"], "reference_start_s": "",
+         "reference_end_s": "", "reviewer_id": "", "boundary_status": "unreviewed",
+         "review_note": "",
+         "automatic_revised_start_s": row.get("revised_start_s", ""),
+         "automatic_revised_end_s": row.get("revised_end_s", "")}
+        for row in rows
+    ]
+    write_csv(output_dir / "word_review_reference_template.csv", template, MANUAL_TEMPLATE_FIELDS)
+    return rows
 
 
 def _safe_rate(numerator: int | float, denominator: int | float) -> float | None:
@@ -236,12 +417,19 @@ def evaluate_manual_references(
     missing_predictions = 0
     cache: dict[str, Any] = {}
     for row in references:
+        if str(row.get("boundary_status", "")).lower() in {
+            "uncertain", "undeterminable", "cannot_determine", "unreviewed",
+        }:
+            continue
         sample_id = str(row["sample_id"])
         try:
             word_index = int(row["word_index"])
             reference_start = float(row["reference_start_s"])
             reference_end = float(row["reference_end_s"])
         except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(reference_start) and math.isfinite(reference_end)
+                and 0 <= reference_start < reference_end):
             continue
         reviewed_rows += 1
         if sample_id not in cache:
@@ -391,9 +579,13 @@ def build_quality_reports(
                 "manual_reference_present": int(row["sample_id"] in reference_samples),
             })
     write_csv(output_dir / "review_candidates.csv", candidates, REVIEW_FIELDS)
+    word_rows = write_word_review_reports(
+        [output_dir / "samples" / row["sample_id"] for row in selected_rows], output_dir,
+    )
     automatic_samples = {str(row["sample_id"]) for row in candidates}
     summary["manual_reference_sample_count"] = len(reference_samples)
     summary["automatic_review_candidate_count"] = len(automatic_samples)
+    summary["automatic_word_review_candidate_count"] = len(word_rows)
     summary["manual_and_automatic_overlap_count"] = len(reference_samples & automatic_samples)
     summary["review_set_note"] = (
         "Manual-reference samples and automatically selected anomaly candidates are counted separately."
@@ -409,3 +601,31 @@ def build_quality_reports(
         manifest_rows.append(merged)
     write_csv(output_dir / "manifest.csv", manifest_rows, manifest_fields)
     return summary
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Rebuild Q1 quality reports from existing sample outputs")
+    parser.add_argument("--data-root", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--labels", type=Path, default=None)
+    parser.add_argument("--sample-id", action="append", required=True)
+    parser.add_argument("--manual-reference-csv", type=Path, default=None)
+    args = parser.parse_args()
+    records, _ = load_samples(
+        args.data_root, args.labels, expected_count=100,
+        probe_decode=False, output_dir=args.output_dir,
+    )
+    known = {record.sample_id for record in records}
+    missing = set(args.sample_id) - known
+    if missing:
+        raise ValueError(f"Unknown sample IDs: {sorted(missing)}")
+    build_quality_reports(
+        args.output_dir, records,
+        manual_reference_csv=args.manual_reference_csv,
+        selected_sample_ids=set(args.sample_id),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
