@@ -111,8 +111,9 @@ def main() -> None:
     data = as_tensors(load_main(args.data_root, "valid",
                                 need_teacher=model.text_mode == "bert" and not bert_finetune))
     if bert_finetune:
-        tokenizer = load_text_tokenizer(bert_model_name, bert_revision)
-        attach_full_text_inputs(data, tokenizer, model.bert_max_length)
+        source = getattr(model, "bert_input_source", "raw_text")
+        tokenizer = load_text_tokenizer(bert_model_name, bert_revision) if source == "raw_text" else None
+        attach_full_text_inputs(data, tokenizer, model.bert_max_length, source)
     rows = []
     for case in build_cases(args.rates, args.locations):
         result = score_case(model, data, device, args.batch_size,

@@ -7,7 +7,7 @@ from model.bert_text import align_bert_outputs
 from scripts.infer import load_checkpoint_state
 from scripts.train import checkpoint_state_dict
 from utils.augmentation import mask_batch
-from utils.text import mask_full_text_attention, prepare_full_text_inputs
+from utils.text import mask_full_text_attention, prepare_full_text_inputs, prepare_bert_inputs
 
 
 class TinyTokenizer:
@@ -25,6 +25,16 @@ class TinyTokenizer:
 
 
 class BertFineTuneChecks(unittest.TestCase):
+    def test_stored_tokens_do_not_require_raw_text(self):
+        tokens = np.zeros((1, 3, 50), dtype=np.int64)
+        tokens[0, 0, :4] = [101, 17, 18, 102]
+        tokens[0, 1, :4] = 1
+        prepared = prepare_bert_inputs({"tokens": tokens}, source="text_bert")
+        self.assertTrue(np.array_equal(prepared["bert_input_ids"], tokens[:, 0]))
+        self.assertTrue(np.array_equal(prepared["bert_attention_mask"], tokens[:, 1]))
+        prepared["bert_input_ids"][0, 1] = 0
+        self.assertEqual(tokens[0, 0, 1], 17)
+
     def test_compact_checkpoint_keeps_only_trainable_bert_weights(self):
         class TinyModel(torch.nn.Module):
             def __init__(self):

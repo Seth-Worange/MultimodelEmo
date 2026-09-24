@@ -20,7 +20,7 @@ class AffectiveModel(nn.Module, AlignedInputProcessing):
                  bert_model_revision: str = "86b5e0934494bd15c9632b12f734a8a67f723594",
                  bert_freeze_bottom_layers: int = 8,
                  bert_gradient_checkpointing: bool = True,
-                 bert_max_length: int = 512):
+                 bert_max_length: int = 512, bert_input_source: str = "raw_text"):
         super().__init__()
         if fusion not in {"gate", "concat"}:
             raise ValueError(f"Unknown fusion mode: {fusion}")
@@ -42,6 +42,7 @@ class AffectiveModel(nn.Module, AlignedInputProcessing):
         self.bert_model_revision = bert_model_revision
         self.bert_freeze_bottom_layers = int(bert_freeze_bottom_layers)
         self.bert_max_length = int(bert_max_length)
+        self.bert_input_source = bert_input_source
         if self.bert_finetune and text_mode != "bert":
             raise ValueError("bert_finetune requires text_mode='bert'")
         self.init_input_processing(normalize_inputs, pack_aligned_grus, AUDIO_DIM, VISION_DIM)

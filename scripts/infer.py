@@ -18,7 +18,7 @@ from utils.config import parse_config_args
 from utils.alignment import alignment_coverage, mapped_word_text
 from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text,
                         load_text_encoder, load_text_tokenizer,
-                        mask_full_text_attention, prepare_full_text_inputs)
+                        mask_full_text_attention, prepare_bert_inputs)
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel
 from model.cica_net import CICAAffectiveModel
@@ -35,7 +35,7 @@ class ModelEnsemble(torch.nn.Module):
             raise ValueError("Ensemble checkpoints must use the same text mode")
         if any(model.regression_mode != models[0].regression_mode for model in models):
             raise ValueError("Ensemble checkpoints must use the same regression mode")
-        for name in ("bert_finetune", "bert_model_name", "bert_model_revision", "bert_max_length"):
+        for name in ("bert_finetune", "bert_model_name", "bert_model_revision", "bert_max_length", "bert_input_source"):
             if any(getattr(model, name, None) != getattr(models[0], name, None) for model in models):
                 raise ValueError("Ensemble checkpoints must use the same BERT configuration")
         self.text_mode = models[0].text_mode
@@ -44,6 +44,7 @@ class ModelEnsemble(torch.nn.Module):
         self.bert_model_name = getattr(models[0], "bert_model_name", DEFAULT_BERT)
         self.bert_model_revision = getattr(models[0], "bert_model_revision", DEFAULT_BERT_REVISION)
         self.bert_max_length = getattr(models[0], "bert_max_length", 512)
+        self.bert_input_source = getattr(models[0], "bert_input_source", "raw_text")
         self.models = torch.nn.ModuleList(models)
 
     def forward(self, *inputs: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -105,6 +106,7 @@ class NeutralZeroModel(torch.nn.Module):
         self.bert_model_name = getattr(model, "bert_model_name", DEFAULT_BERT)
         self.bert_model_revision = getattr(model, "bert_model_revision", DEFAULT_BERT_REVISION)
         self.bert_max_length = getattr(model, "bert_max_length", 512)
+        self.bert_input_source = getattr(model, "bert_input_source", "raw_text")
 
     def forward(self, *inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         output = dict(self.model(*inputs))
@@ -293,8 +295,9 @@ def main() -> None:
     bert_model_name = getattr(model, "bert_model_name", DEFAULT_BERT)
     bert_revision = getattr(model, "bert_model_revision", DEFAULT_BERT_REVISION)
     bert_max_length = getattr(model, "bert_max_length", 512)
+    source = getattr(model, "bert_input_source", "raw_text")
     tokenizer = (load_text_tokenizer(bert_model_name, bert_revision)
-                 if bert_finetune else None)
+                 if bert_finetune and source == "raw_text" else None)
     text_encoder = (load_text_encoder(device, bert_model_name, bert_revision)
                     if model.text_mode == "bert" and args.part == "q3" and not bert_finetune else None)
     files = find_files(root, args.part, args.input_dir)
@@ -321,9 +324,9 @@ def main() -> None:
         sample_id = item["id"] or path.stem
         batch = tensor_item(item, device)
         if bert_finetune:
-            prepared = prepare_full_text_inputs(
+            prepared = prepare_bert_inputs(
                 {"tokens": batch["tokens"].cpu().numpy(), "raw_text": [item["raw_text"]],
-                 "ids": [sample_id]}, tokenizer, bert_max_length)
+                 "ids": [sample_id]}, tokenizer, bert_max_length, source)
             for key in ("bert_input_ids", "bert_attention_mask", "bert_token_type_ids"):
                 batch[key] = torch.as_tensor(prepared[key], dtype=torch.long, device=device)
         elif model.text_mode == "bert" and "teacher" not in batch:

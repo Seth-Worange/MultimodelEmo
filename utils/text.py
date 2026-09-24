@@ -121,6 +121,22 @@ def prepare_full_text_inputs(data: dict, tokenizer, max_length: int = 512) -> di
     }
 
 
+def prepare_bert_inputs(data: dict, tokenizer=None, max_length: int = 512,
+                        source: str = "raw_text") -> dict:
+    """选择原始50位输入或完整转写，训练和推理使用同一来源。"""
+    if source == "raw_text":
+        return prepare_full_text_inputs(data, tokenizer, max_length)
+    if source != "text_bert":
+        raise ValueError(f"Unknown BERT input source: {source}")
+    tokens = np.asarray(data["tokens"])
+    return {
+        "bert_input_ids": tokens[:, 0].astype(np.int64, copy=True),
+        "bert_attention_mask": tokens[:, 1].astype(np.int64, copy=True),
+        "bert_token_type_ids": tokens[:, 2].astype(np.int64, copy=True),
+        "bert_text_stats": {"source": source, "n_samples": len(tokens), "max_length": 50},
+    }
+
+
 def mask_full_text_attention(attention: torch.Tensor, text_mask: torch.Tensor) -> torch.Tensor:
     """把 50 词位文本掩码映射到完整 BERT 序列。"""
     masked = attention.clone().bool()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -69,6 +70,7 @@ class FineTunedBertTextEncoder(nn.Module):
             raise ValueError("当前模型不支持 BERT encoder.layer 冻结策略")
         if not 0 <= freeze_bottom_layers < len(layers):
             raise ValueError(f"freeze_bottom_layers must be between 0 and {len(layers) - 1}")
+        self.adaptation_enabled = True
         self.freeze_bottom_layers = int(freeze_bottom_layers)
         self.frozen_layers = list(layers[:self.freeze_bottom_layers])
         for parameter in self.backbone.embeddings.parameters():
@@ -85,8 +87,15 @@ class FineTunedBertTextEncoder(nn.Module):
             self.backbone.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False})
 
+    def set_adaptation_enabled(self, enabled: bool):
+        """预热期间关闭BERT梯度与dropout，保留可训练参数标识。"""
+        self.adaptation_enabled = enabled
+        self.train(self.training)
+
     def train(self, mode: bool = True):
         super().train(mode)
+        if mode and not self.adaptation_enabled:
+            self.backbone.eval()
         if mode:
             self.backbone.embeddings.eval()
             for layer in self.frozen_layers:
@@ -101,6 +110,7 @@ class FineTunedBertTextEncoder(nn.Module):
         inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
         if token_type_ids is not None:
             inputs["token_type_ids"] = token_type_ids
-        hidden = self.backbone(**inputs, return_dict=True).last_hidden_state
+        with (contextlib.nullcontext() if self.adaptation_enabled else torch.no_grad()):
+            hidden = self.backbone(**inputs, return_dict=True).last_hidden_state
         aligned, tail, tail_available = align_bert_outputs(hidden, attention_mask)
         return aligned, tail, tail_available

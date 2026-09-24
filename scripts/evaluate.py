@@ -68,8 +68,9 @@ def main() -> None:
     data = as_tensors(load_main(args.data_root, args.split,
                                 need_teacher=model.text_mode == "bert" and not bert_finetune))
     if bert_finetune:
-        tokenizer = load_text_tokenizer(bert_model_name, bert_revision)
-        attach_full_text_inputs(data, tokenizer, model.bert_max_length)
+        source = getattr(model, "bert_input_source", "raw_text")
+        tokenizer = load_text_tokenizer(bert_model_name, bert_revision) if source == "raw_text" else None
+        attach_full_text_inputs(data, tokenizer, model.bert_max_length, source)
     text_encoder = (load_text_encoder(device, bert_model_name, bert_revision)
                     if model.text_mode == "bert" and not bert_finetune else None)
     predicted = predict_split(model, data, args.batch_size, device, seed=args.seed,

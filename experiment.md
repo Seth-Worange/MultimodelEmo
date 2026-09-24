@@ -350,3 +350,12 @@ seed2028配对训练与验证已完成。下一步针对强情感组做signed与
 长转写不再只用 `text_bert` 预存的50个位置。代码按固定 tokenizer 重编码完整原句并核对前缀：前49个BERT位置仍与既有对齐位置一致，SEP放在第50位；多出的词位汇成尾部向量，通过可学习残差进入样本级融合表征，因此不会移动音频、视觉的对齐索引。默认上限512，超过时采用头尾拼接；本轮已核实训练集234/3395、验证集44/728条超过50个子词，最长422，均无需截断。
 
 训练命令：`python -m scripts.train --config config/q2_fuse_bert_finetune.yaml`。验证命令：`python -m scripts.evaluate --config config/q2_fuse_bert_finetune.yaml`。本节是待运行方案，当前没有微调后的验证指标，不应与历史FUSE结果比较或宣称性能提升。完整微调检查点会较大；赛题对通用公开预训练权重的附件豁免，不应误解为可以忽略附件总大小，提交时需依据组委会要求使用可复现加载/训练脚本或另做低秩适配压缩。
+
+
+## 2026-09-25：BERT微调退化诊断与配对对照
+
+用户提供的5090运行日志：原完整转写方案最佳epoch2，valid clean Accuracy=0.611264、Macro-F1=0.583595、MAE=0.610502、Pearson=0.664127；whole AV F1=0.605448、MAE=0.592061。训练总loss从1.5919降到0.5452，但验证未持续改善，符合过拟合/多目标优化失配的表现；whole优于clean提示融合干扰，尚不能证明单一因果。原配置同时改变BERT可训练性、长文本上下文、尾部残差、任务学习率、实际batch，无法单独归因于微调或raw_text。FUSE现有对比项是同样本词位的共享/私有比较，并非跨样本InfoNCE；不以“batch4缺少负例”解释退化。
+
+新增`bert_input_source: text_bert`直接使用三通道原始输入；旧检查点默认raw_text，保持历史推理方式。新增`bert_warmup_epochs`先冻结BERT且关闭其dropout，训练下游网络；之后解冻顶部原定层。冻结通过no_grad实现，不改变参数保存范围。日志和检查点记录bert_phase，若最优模型来自预热期，不得将其称为微调提升。
+
+配对配置：`config/q2_fuse_bert_aligned_frozen.yaml`全程冻结，`config/q2_fuse_bert_aligned_finetune.yaml`预热2轮后以1e-5更新顶部2层。两者实际batch32、累积1次、任务lr1e-3、相同seed/增强/归一化/sample_v2评估。各自使用独立输出目录，不覆盖此前失败实验。依次用`python -m scripts.train --config <配置路径>`训练，再用`python -m scripts.evaluate --config <同一配置路径>`验证。先比较这两份配对结果，再单独评估长文本扩展；新方案尚无完整训练指标。

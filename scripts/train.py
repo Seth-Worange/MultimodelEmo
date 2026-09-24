@@ -20,7 +20,7 @@ from utils.augmentation import INTERVAL_RATIOS, drop_modalities, mask_batch
 from utils.config import parse_config_args
 from utils.data import load_main
 from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text, load_text_encoder,
-                        load_text_tokenizer, prepare_full_text_inputs)
+                        load_text_tokenizer, prepare_bert_inputs)
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel, build_fuse_regularization
 
@@ -40,7 +40,7 @@ def build_model(args) -> torch.nn.Module:
             bert_model_revision=args.bert_model_revision,
             bert_freeze_bottom_layers=args.bert_freeze_bottom_layers,
             bert_gradient_checkpointing=args.bert_gradient_checkpointing,
-            bert_max_length=args.bert_max_length)
+            bert_max_length=args.bert_max_length, bert_input_source=args.bert_input_source)
     return AffectiveModel(fusion=args.fusion, text_mode=args.text_mode,
                           audio_dynamics=args.audio_dynamics,
                           regression_mode=args.regression_mode, dropout=args.dropout,
@@ -51,7 +51,7 @@ def build_model(args) -> torch.nn.Module:
                           bert_model_revision=args.bert_model_revision,
                           bert_freeze_bottom_layers=args.bert_freeze_bottom_layers,
                           bert_gradient_checkpointing=args.bert_gradient_checkpointing,
-                          bert_max_length=args.bert_max_length)
+                          bert_max_length=args.bert_max_length, bert_input_source=args.bert_input_source)
 
 
 def model_config(args) -> dict:
@@ -68,7 +68,7 @@ def model_config(args) -> dict:
               "bert_model_revision": args.bert_model_revision,
               "bert_freeze_bottom_layers": args.bert_freeze_bottom_layers,
               "bert_gradient_checkpointing": args.bert_gradient_checkpointing,
-              "bert_max_length": args.bert_max_length}
+              "bert_max_length": args.bert_max_length, "bert_input_source": args.bert_input_source}
     if args.architecture == "fuse":
         return {**common, "tau": args.tau}
     return {**common, "fusion": args.fusion}
@@ -128,9 +128,9 @@ def model_inputs(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:
     return inputs
 
 
-def attach_full_text_inputs(data: dict, tokenizer, max_length: int) -> dict:
+def attach_full_text_inputs(data: dict, tokenizer, max_length: int, source: str = "raw_text") -> dict:
     """把完整转写的 BERT 输入加入切分数据。"""
-    prepared = prepare_full_text_inputs(data, tokenizer, max_length)
+    prepared = prepare_bert_inputs(data, tokenizer, max_length, source)
     stats = prepared.pop("bert_text_stats")
     data.update({key: torch.from_numpy(value) for key, value in prepared.items()})
     return stats
@@ -349,6 +349,9 @@ def main() -> None:
     parser.add_argument("--bert-freeze-bottom-layers", type=int, default=8)
     parser.add_argument("--bert-learning-rate", type=float, default=2e-5)
     parser.add_argument("--bert-max-length", type=int, default=512)
+    parser.add_argument("--bert-input-source", choices=("text_bert", "raw_text"), default="raw_text")
+    parser.add_argument("--bert-warmup-epochs", type=int, default=0)
+    parser.add_argument("--bert-update", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--bert-gradient-checkpointing", action=argparse.BooleanOptionalAction,
                         default=True)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
@@ -406,6 +409,7 @@ def main() -> None:
             or not 0 <= args.overlap_probability <= 1
             or any(not 0 < ratio <= 1 for ratio in args.interval_ratios)
             or not 0 <= args.local_rate_min <= args.local_rate_max <= 1
+            or args.bert_warmup_epochs < 0
             or args.bert_learning_rate <= 0 or args.bert_freeze_bottom_layers < 0
             or args.bert_max_length < 50 or args.gradient_accumulation_steps < 1
             or (args.bert_finetune and args.text_mode != "bert")):
@@ -423,17 +427,18 @@ def main() -> None:
     print(f"device={device}" + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""))
 
     print("loading aligned_50.pkl train/valid; this file is about 1 GB")
-    need_teacher = args.text_mode == "bert" and not args.bert_finetune
+    need_teacher = not args.bert_finetune
     train_data = as_tensors(load_main(args.data_root, "train", need_teacher=need_teacher))
     valid_data = as_tensors(load_main(args.data_root, "valid", need_teacher=need_teacher))
     bert_text_stats = None
     if args.bert_finetune:
-        tokenizer = load_text_tokenizer(args.bert_model_name, args.bert_model_revision)
+        tokenizer = (load_text_tokenizer(args.bert_model_name, args.bert_model_revision)
+                     if args.bert_input_source == "raw_text" else None)
         bert_text_stats = {
-            "train": attach_full_text_inputs(train_data, tokenizer, args.bert_max_length),
-            "valid": attach_full_text_inputs(valid_data, tokenizer, args.bert_max_length),
+            "train": attach_full_text_inputs(train_data, tokenizer, args.bert_max_length, args.bert_input_source),
+            "valid": attach_full_text_inputs(valid_data, tokenizer, args.bert_max_length, args.bert_input_source),
         }
-        print("full text prepared for BERT: " + json.dumps(bert_text_stats, ensure_ascii=False))
+        print("BERT inputs prepared: " + json.dumps(bert_text_stats, ensure_ascii=False))
     model = build_model(args).to(device)
     if args.normalize_inputs:
         model.fit_input_stats(train_data)
@@ -441,7 +446,7 @@ def main() -> None:
     drop = tuple(args.drop_modalities or ())
     if drop:
         print(f"permanently dropping modalities: {', '.join(drop)}")
-    text_encoder = load_text_encoder(device) if need_teacher else None
+    text_encoder = load_text_encoder(device) if args.text_mode == "bert" and need_teacher else None
     counts = np.bincount(train_data["classes"].numpy(), minlength=3)
     class_weights = torch.as_tensor((counts.max() / counts) ** args.class_weight_power,
                                     dtype=torch.float32, device=device)
@@ -472,11 +477,17 @@ def main() -> None:
 
     reg_fields = [f"reg_{name}" for name in REG_FIELDS] if args.architecture == "fuse" else []
     with metrics_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_score"] + reg_fields +
+        writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_score", "bert_phase", "bert_lr"] + reg_fields +
                                 [f"{view}_{m}" for view in VIEWS
                                  for m in ("accuracy", "macro_f1", "mae", "pearson")])
         writer.writeheader()
         for epoch in tqdm(range(1, args.epochs + 1), desc="训练轮次", unit="epoch"):
+            phase = "cached"
+            if args.bert_finetune:
+                adapting = args.bert_update and epoch > args.bert_warmup_epochs
+                model.bert_text_encoder.set_adaptation_enabled(adapting)
+                phase = "joint" if adapting else ("warmup" if args.bert_update else "frozen_control")
+                tqdm.write(f"BERT phase={phase}")
             model.train()
             order = torch.randperm(len(train_data["tokens"]))
             total_loss, batches = 0.0, 0
@@ -544,7 +555,8 @@ def main() -> None:
                 evaluation_protocol=args.evaluation_protocol,
                 local_rate_range=(args.local_rate_min, args.local_rate_max), drop=drop)
             score = selection_score(view_metrics)
-            row = {"epoch": epoch, "train_loss": total_loss / max(1, batches), "val_score": score}
+            row = {"epoch": epoch, "train_loss": total_loss / max(1, batches), "val_score": score,
+                   "bert_phase": phase, "bert_lr": args.bert_learning_rate if phase == "joint" else 0.0}
             reg_summary = ""
             if reg_fields:
                 for name in REG_FIELDS:
@@ -578,9 +590,12 @@ def main() -> None:
                     "evaluation_seed": evaluation_seed(args),
                     "bert_text_stats": bert_text_stats,
                     "compact_bert_state": args.bert_finetune,
+                    "bert_phase": phase,
                 }, args.output_dir / "best.pt")
             else:
                 stale += 1
+            if args.bert_finetune and args.bert_update and epoch <= args.bert_warmup_epochs:
+                stale = 0
             if stale >= args.patience:
                 tqdm.write(f"early stopping at epoch {epoch}; best epoch={best_epoch}")
                 break
