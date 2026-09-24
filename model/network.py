@@ -74,6 +74,7 @@ class AffectiveModel(nn.Module):
         audio_mask: torch.Tensor,
         vision_mask: torch.Tensor,
         text_features: torch.Tensor | None = None,
+        return_features: bool = False,
     ) -> dict[str, torch.Tensor]:
         batch, steps = tokens.shape
         if steps != SEQ_LEN:
@@ -128,9 +129,12 @@ class AffectiveModel(nn.Module):
             "sentiment": sentiment,
             "modality_weights": modality_weights,
             "time_weights": time_weights,
+            "valid_steps": valid_steps,
         }
         if self.text_mode == "tokens":
             result["teacher_pred"] = self.text_teacher(text_state)
+        if return_features:
+            result["feature"] = pooled
         return result
 
 

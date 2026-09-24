@@ -1,0 +1,21 @@
+cmad:
+  teacher_checkpoint: outputs/q2_teacher_formal_s2026/best.pt
+  data_root: data
+  device: cpu
+  epochs: 50
+  batch_size: 32
+  lr: 0.001
+  patience: 8
+  seed: 2026
+  output_dir: outputs/q2_autoresearch/iteration_01_textmask_s0
+  corruption_probability: 0.8
+  whole_probability: 0.3
+  interval_ratios: [0.1, 0.2, 0.4, 0.6]
+  interval_modalities: [text, audio, vision]
+  temperature: 2.0
+  output_kd_weight: 0.2
+  feature_kd_weight: 0.1
+  correlation_kd_weight: 0.05
+  disable_output_kd: true
+  disable_feature_kd: true
+  disable_correlation_kd: true

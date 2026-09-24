@@ -1,0 +1,15 @@
+teacher:
+  data_root: data
+  device: cuda
+  epochs: 50
+  batch_size: 32
+  lr: 0.001
+  patience: 8
+  seed: 2026
+  output_dir: outputs/teachers/q2_gate_s2026
+  fusion: gate
+  text_mode: bert
+  audio_dynamics: true
+  regression_mode: soft
+  dropout: 0.2
+  class_weight_power: 0.5

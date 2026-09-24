@@ -88,9 +88,17 @@ def model_inputs(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:
 
 def supervised_loss(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
                     class_weights: torch.Tensor | None = None) -> torch.Tensor:
-    return F.cross_entropy(output["logits"], batch["classes"], weight=class_weights) + F.smooth_l1_loss(
-        output["sentiment"], batch["sentiment"]
-    )
+    classification, regression = supervised_loss_components(output, batch, class_weights)
+    return classification + regression
+
+
+def supervised_loss_components(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
+                               class_weights: torch.Tensor | None = None
+                               ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the existing classification and regression terms separately."""
+    classification = F.cross_entropy(output["logits"], batch["classes"], weight=class_weights)
+    regression = F.smooth_l1_loss(output["sentiment"], batch["sentiment"])
+    return classification, regression
 
 
 def distillation_loss(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -191,6 +199,10 @@ def evaluate(
             if (view != "clean" and text_encoder is not None
                     and not torch.equal(cpu_batch["text_mask"], clean_cpu["text_mask"])):
                 batch["teacher"] = encode_text(batch, text_encoder)
+            elif (view != "clean" and "teacher" in batch
+                  and not torch.equal(cpu_batch["text_mask"], clean_cpu["text_mask"])):
+                batch["teacher"] = batch["teacher"].clone()
+                batch["teacher"][~batch["text_mask"]] = 0.0
             output = model(*model_inputs(batch))
             gathered[f"{view}_logits"].append(output["logits"].cpu().numpy())
             gathered[f"{view}_sentiment"].append(output["sentiment"].cpu().numpy())
