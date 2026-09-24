@@ -25,6 +25,7 @@ from torch.nn import functional as F
 from utils.data import AUDIO_DIM, SEQ_LEN, TEXT_DIM, VISION_DIM, VOCAB_SIZE
 from .transformer_encoder import TemporalTransformerEncoder
 from .input_processing import AlignedInputProcessing
+from .bert_text import FineTunedBertTextEncoder
 
 MODALITIES = ("text", "audio", "vision")
 FACTORS = ("shared", "private", "noise")
@@ -42,7 +43,12 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
                  tau: float = 0.1, use_availability_embedding: bool = True,
                  encoder_type: str = "bigru", transformer_layers: int = 1,
                  transformer_heads: int = 4, normalize_inputs: bool = False,
-                 pack_aligned_grus: bool = False):
+                 pack_aligned_grus: bool = False, bert_finetune: bool = False,
+                 bert_model_name: str = "google-bert/bert-base-uncased",
+                 bert_model_revision: str = "86b5e0934494bd15c9632b12f734a8a67f723594",
+                 bert_freeze_bottom_layers: int = 8,
+                 bert_gradient_checkpointing: bool = True,
+                 bert_max_length: int = 512):
         super().__init__()
         if text_mode not in {"tokens", "bert"}:
             raise ValueError(f"Unknown text mode: {text_mode}")
@@ -55,6 +61,13 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
         self.audio_dynamics = audio_dynamics
         self.regression_mode = regression_mode
         self.encoder_type = encoder_type
+        self.bert_finetune = bool(bert_finetune)
+        self.bert_model_name = bert_model_name
+        self.bert_model_revision = bert_model_revision
+        self.bert_freeze_bottom_layers = int(bert_freeze_bottom_layers)
+        self.bert_max_length = int(bert_max_length)
+        if self.bert_finetune and text_mode != "bert":
+            raise ValueError("bert_finetune requires text_mode='bert'")
         self.init_input_processing(normalize_inputs, pack_aligned_grus, AUDIO_DIM, VISION_DIM)
         self.tau = float(tau)
         width = hidden_dim * 2
@@ -66,6 +79,14 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
         else:
             self.text_input = nn.Sequential(nn.Linear(TEXT_DIM, width), nn.LayerNorm(width), nn.GELU())
             text_input_dim = width
+            if self.bert_finetune:
+                self.bert_text_encoder = FineTunedBertTextEncoder(
+                    bert_model_name, bert_model_revision, bert_freeze_bottom_layers,
+                    bert_gradient_checkpointing)
+                if self.bert_max_length > self.bert_text_encoder.backbone.config.max_position_embeddings:
+                    raise ValueError("bert_max_length exceeds the pretrained model position limit")
+                self.long_text_projection = nn.Linear(TEXT_DIM, width)
+                self.long_text_scale = nn.Parameter(torch.tensor(0.0))
         audio_dim = AUDIO_DIM * (2 if audio_dynamics else 1)
         self.audio_input = nn.Sequential(nn.Linear(audio_dim, width), nn.LayerNorm(width), nn.GELU())
         self.vision_input = nn.Sequential(nn.Linear(VISION_DIM, width), nn.LayerNorm(width), nn.GELU())
@@ -141,16 +162,25 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
         delta[:, 1:] = (audio[:, 1:] - audio[:, :-1]) * adjacent.unsqueeze(-1).to(audio.dtype)
         return torch.cat((audio, delta), dim=-1)
 
-    def encode(self, tokens, lengths, audio, vision, audio_mask, vision_mask, text_features=None):
+    def encode(self, tokens, lengths, audio, vision, audio_mask, vision_mask, text_features=None,
+               bert_input_ids=None, bert_attention_mask=None, bert_token_type_ids=None):
         steps = tokens.shape[1]
         lengths = lengths.clamp(1, steps).to("cpu", dtype=torch.int64)
         audio, vision = self.prepare_aligned_inputs(audio, vision, audio_mask, vision_mask)
         if self.text_mode == "tokens":
             text_input = self.embedding(tokens)
+            tail_context = tail_available = None
+        elif self.bert_finetune:
+            if bert_input_ids is None or bert_attention_mask is None:
+                raise ValueError("bert_finetune requires full-text BERT input ids and attention mask")
+            aligned_text, tail_context, tail_available = self.bert_text_encoder(
+                bert_input_ids, bert_attention_mask, bert_token_type_ids)
+            text_input = self.text_input(aligned_text)
         else:
             if text_features is None or text_features.shape[:2] != tokens.shape:
                 raise ValueError("bert text_mode requires (batch, steps, 768) text_features")
             text_input = self.text_input(text_features)
+            tail_context = tail_available = None
         if self.encoder_type == "bigru":
             packed = nn.utils.rnn.pack_padded_sequence(
                 text_input, lengths, batch_first=True, enforce_sorted=False)
@@ -165,7 +195,11 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
             audio_state = self.audio_transformer(
                 self.audio_input(self._audio_features(audio, audio_mask)), audio_mask)
             vision_state = self.vision_transformer(self.vision_input(vision), vision_mask)
-        return {"text": text_state, "audio": audio_state, "vision": vision_state}
+        encoded = {"text": text_state, "audio": audio_state, "vision": vision_state}
+        if tail_context is not None:
+            encoded["_tail_context"] = tail_context
+            encoded["_tail_available"] = tail_available
+        return encoded
 
     def factorize(self, encoded, available, tau=None):
         """HMF + MRC：返回三因子、重建结果与 KL 项（不可用词位一律置零）。"""
@@ -223,12 +257,16 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
         return aggregated, modality_share
 
     def forward(self, tokens, lengths, audio, vision, text_mask, audio_mask, vision_mask,
-                text_features=None):
+                text_features=None, bert_input_ids=None, bert_attention_mask=None,
+                bert_token_type_ids=None):
         steps = tokens.shape[1]
         if steps != SEQ_LEN:
             raise ValueError(f"Expected {SEQ_LEN} sequence positions, got {steps}")
         lengths = lengths.clamp(1, steps).to("cpu", dtype=torch.int64)
-        encoded = self.encode(tokens, lengths, audio, vision, audio_mask, vision_mask, text_features)
+        encoded = self.encode(tokens, lengths, audio, vision, audio_mask, vision_mask, text_features,
+                              bert_input_ids, bert_attention_mask, bert_token_type_ids)
+        tail_context = encoded.pop("_tail_context", None)
+        tail_available = encoded.pop("_tail_available", None)
         available = {"text": text_mask.bool(), "audio": audio_mask.bool(), "vision": vision_mask.bool()}
         factors, recon, kl, _ = self.factorize(encoded, available)
         aggregated, modality_share = self.dynamic_fusion(factors, available)
@@ -243,6 +281,9 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
         fused_state = self.run_aligned_gru(self.fusion_gru, fused, lengths)
         time_weights = self._masked_softmax(self.pool_score(fused_state).squeeze(-1), valid_steps, dim=1)
         pooled = (fused_state * time_weights.unsqueeze(-1)).sum(dim=1)
+        if tail_context is not None:
+            tail = self.long_text_projection(tail_context)
+            pooled = pooled + torch.tanh(self.long_text_scale) * tail * tail_available.unsqueeze(-1)
         pooled = self.dropout(pooled)
         logits = self.classifier(pooled)
         raw_strength = self.regressor(pooled).squeeze(-1)

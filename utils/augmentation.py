@@ -36,7 +36,8 @@ INTERVAL_PLANS = (
     (("text", "vision"), 0.5),
     (("text", "audio", "vision"), 0.5),
 )
-_CLONE_KEYS = ("tokens", "audio", "vision", "text_mask", "audio_mask", "vision_mask")
+_CLONE_KEYS = ("tokens", "audio", "vision", "text_mask", "audio_mask", "vision_mask",
+               "bert_input_ids", "bert_attention_mask", "bert_token_type_ids")
 
 
 def _positions(valid: torch.Tensor) -> torch.Tensor:
@@ -115,6 +116,11 @@ def _apply_whole(out: dict, masks: dict, row: int, names: tuple[str, ...]) -> No
         masks[name][row].zero_()
         if name == "text":
             out["tokens"][row, 0].zero_()
+            if "bert_attention_mask" in out:
+                active = torch.where(out["bert_attention_mask"][row].bool())[0]
+                if active.numel() > 2:
+                    end = int(active[-1].item())
+                    out["bert_attention_mask"][row, 1:end] = 0
         else:
             out[name][row].zero_()
 
@@ -127,6 +133,14 @@ def _apply_drops(out: dict, masks: dict, row: int, names: tuple[str, ...],
         masks[name][row, drops] = False
         if name == "text":
             out["tokens"][row, 0, drops] = 0
+            if "bert_attention_mask" in out:
+                valid = drops[(drops > 0) & (drops < 49)]
+                out["bert_attention_mask"][row, valid] = 0
+                active = torch.where(out["bert_attention_mask"][row].bool())[0]
+                if active.numel() > 2:
+                    end = int(active[-1].item())
+                    if end > 49:
+                        out["bert_attention_mask"][row, 49:end] = 0
         else:
             out[name][row, drops] = 0.0
 
@@ -185,7 +199,8 @@ def mask_batch(
     rng = random.Random(seed)
     out = batch.copy()
     for key in _CLONE_KEYS:
-        out[key] = batch[key].clone()
+        if key in batch:
+            out[key] = batch[key].clone()
     masks = {name: out[f"{name}_mask"] for name in MODALITIES}
     remainder = (1.0 - whole_probability) / 2.0
 
@@ -243,11 +258,18 @@ def drop_modalities(batch: dict[str, torch.Tensor],
         raise ValueError(f"unknown modality in {names}")
     out = batch.copy()
     for key in _CLONE_KEYS:
-        out[key] = batch[key].clone()
+        if key in batch:
+            out[key] = batch[key].clone()
     for name in names:
         out[f"{name}_mask"].zero_()
         if name == "text":
             out["tokens"][:, 0].zero_()
+            if "bert_attention_mask" in out:
+                for row in range(len(out["tokens"])):
+                    active = torch.where(out["bert_attention_mask"][row].bool())[0]
+                    if active.numel() > 2:
+                        end = int(active[-1].item())
+                        out["bert_attention_mask"][row, 1:end] = 0
         else:
             out[name].zero_()
     return out

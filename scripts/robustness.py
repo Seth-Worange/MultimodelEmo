@@ -21,8 +21,10 @@ from utils.augmentation import INTERVAL_RATIOS, mask_batch
 from utils.data import load_main
 from scripts.infer import load_model
 from utils.config import parse_config_args
-from utils.text import encode_text, load_text_encoder
-from scripts.train import as_tensors, make_batch, metrics, model_inputs, move_inputs
+from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text,
+                        load_text_encoder, load_text_tokenizer)
+from scripts.train import (as_tensors, attach_full_text_inputs, make_batch, metrics,
+                           model_inputs, move_inputs)
 
 DEFAULT_RATES = (0.1, 0.2, 0.4, 0.6)
 DEFAULT_LOCATIONS = ("start", "middle", "end", "random")
@@ -101,8 +103,16 @@ def main() -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
     model = load_model(args.checkpoint, device)
-    text_encoder = load_text_encoder(device) if model.text_mode == "bert" else None
-    data = as_tensors(load_main(args.data_root, "valid", need_teacher=model.text_mode == "bert"))
+    bert_finetune = bool(getattr(model, "bert_finetune", False))
+    bert_model_name = getattr(model, "bert_model_name", DEFAULT_BERT)
+    bert_revision = getattr(model, "bert_model_revision", DEFAULT_BERT_REVISION)
+    text_encoder = (load_text_encoder(device, bert_model_name, bert_revision)
+                    if model.text_mode == "bert" and not bert_finetune else None)
+    data = as_tensors(load_main(args.data_root, "valid",
+                                need_teacher=model.text_mode == "bert" and not bert_finetune))
+    if bert_finetune:
+        tokenizer = load_text_tokenizer(bert_model_name, bert_revision)
+        attach_full_text_inputs(data, tokenizer, model.bert_max_length)
     rows = []
     for case in build_cases(args.rates, args.locations):
         result = score_case(model, data, device, args.batch_size,

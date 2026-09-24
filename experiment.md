@@ -342,3 +342,11 @@ P1b的clean Macro-F1仅增加0.57个百分点，MAE恶化0.0069，interval MAE�
 配置与结果位于 `config/q2_fuse_samplev2_control.yaml`、`config/q2_fuse_norm_only.yaml`、`config/q2_fuse_pack_only.yaml`、`config/q2_fuse_norm_pack.yaml` 和 `outputs/diagnostics/bottleneck_audit_20260924/`。完整训练中曾发现正则日志字典在没有对比样本时缺少`contrast`键，已改为该batch的日志值按零统计，正则损失不变；重训运行完整到早停。独立GPU评估确认新checkpoint的标准化参数可以正确加载；两种旧FUSE检查点也在新增buffer后复评，结果与之前sample_v2逐样本结果一致。
 
 seed2028配对训练与验证已完成。下一步针对强情感组做signed与L1回归控制消融，并优先检查标准化收益能否改善单模态消融。不能把当前提升称为全面性能突破，也没有评估test或用附件3/4标签。
+
+## 2026-09-24：P3 完整转写 BERT 微调（待训练）
+
+新增 `config/q2_fuse_bert_finetune.yaml`，以标准化 FUSE 配置为底座，使用 BERT-base-uncased 完整编码 `raw_text`。附件2训练标签更新模型；冻结 BERT embeddings 与底部10层，只训练顶部2层，BERT 学习率 `2e-5`，融合与任务头学习率 `3e-4`。批次4、梯度累积8、CUDA FP16 与梯度检查点用于控制显存；验证集只用于早停和四视图选模，专项附件3/4及主数据test均不进入训练或选择。检查点只保留顶部可训练层的半精度参数，冻结层由固定的公开预训练版本加载，控制提交附件体积。
+
+长转写不再只用 `text_bert` 预存的50个位置。代码按固定 tokenizer 重编码完整原句并核对前缀：前49个BERT位置仍与既有对齐位置一致，SEP放在第50位；多出的词位汇成尾部向量，通过可学习残差进入样本级融合表征，因此不会移动音频、视觉的对齐索引。默认上限512，超过时采用头尾拼接；本轮已核实训练集234/3395、验证集44/728条超过50个子词，最长422，均无需截断。
+
+训练命令：`python -m scripts.train --config config/q2_fuse_bert_finetune.yaml`。验证命令：`python -m scripts.evaluate --config config/q2_fuse_bert_finetune.yaml`。本节是待运行方案，当前没有微调后的验证指标，不应与历史FUSE结果比较或宣称性能提升。完整微调检查点会较大；赛题对通用公开预训练权重的附件豁免，不应误解为可以忽略附件总大小，提交时需依据组委会要求使用可复现加载/训练脚本或另做低秩适配压缩。

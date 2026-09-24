@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tqdm import tqdm
 from torch.nn import functional as F
 
 from model.cica_net import CICAAffectiveModel, MODALITIES
@@ -141,7 +142,9 @@ def _evaluate_branches(model, data, batch_size, device, text_encoder):
     gathered = {name: {"logits": [], "sentiment": [], "classes": [], "target": [],
                        "confidence": [], "uncertainty": [], "uncertainty_target": []}
                 for name in MODALITIES}
-    for start in range(0, len(data["tokens"]), batch_size):
+    starts = range(0, len(data["tokens"]), batch_size)
+    batch_bar = tqdm(starts, desc="CAP验证", unit="batch", leave=False)
+    for start in batch_bar:
         indices = torch.arange(start, min(start + batch_size, len(data["tokens"])))
         cpu_batch = make_batch(data, indices)
         batch = _prepare_batch(cpu_batch, device, text_encoder)
@@ -336,11 +339,14 @@ def main():
                         "mean_uncertainty", "uncertainty_target_mae")]
         writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
-        for epoch in range(1, args.cap_epochs + 1):
+        for epoch in tqdm(range(1, args.cap_epochs + 1), desc="CAP轮次", unit="epoch"):
             model.train()
             order = torch.randperm(len(train_data["tokens"]))
             total, batches = 0.0, 0
-            for offset in range(0, len(order), args.batch_size):
+            offsets = range(0, len(order), args.batch_size)
+            batch_bar = tqdm(offsets, desc=f"CAP {epoch}/{args.cap_epochs}",
+                             unit="batch", leave=False)
+            for offset in batch_bar:
                 indices = order[offset:offset + args.batch_size]
                 clean_cpu = make_batch(train_data, indices)
                 masked_cpu = _masked_batch(clean_cpu, args, epoch, offset)
@@ -357,6 +363,7 @@ def main():
                 cap_optimizer.step()
                 total += float(loss.detach())
                 batches += 1
+                batch_bar.set_postfix(loss=f"{total / batches:.4f}")
             branch_metrics = _evaluate_branches(model, valid_data, args.batch_size,
                                                 device, text_encoder)
             score = _cap_score(branch_metrics)
@@ -365,7 +372,7 @@ def main():
                 row.update({f"{name}_{key}": value for key, value in values.items()})
             writer.writerow(row)
             file.flush()
-            print(f"CAP epoch={epoch:03d} loss={row['train_loss']:.4f} score={score:.4f}")
+            tqdm.write(f"CAP epoch={epoch:03d} loss={row['train_loss']:.4f} score={score:.4f}")
             if score < cap_best:
                 cap_best, cap_epoch, stale = score, epoch, 0
                 torch.save({"model": model.state_dict(), "epoch": epoch, "seed": args.seed,
@@ -374,7 +381,7 @@ def main():
             else:
                 stale += 1
             if stale >= args.cap_patience:
-                print(f"CAP early stopping at epoch {epoch}; best epoch={cap_epoch}")
+                tqdm.write(f"CAP early stopping at epoch {epoch}; best epoch={cap_epoch}")
                 break
 
     cap_checkpoint = torch.load(args.output_dir / "cap_best.pt", map_location=device, weights_only=True)
@@ -392,11 +399,14 @@ def main():
             for key in ("accuracy", "macro_f1", "mae", "pearson")]
         writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
-        for epoch in range(1, args.epochs + 1):
+        for epoch in tqdm(range(1, args.epochs + 1), desc="CIF轮次", unit="epoch"):
             _fusion_train_mode(model)
             order = torch.randperm(len(train_data["tokens"]))
             total, mcp_total, batches = 0.0, 0.0, 0
-            for offset in range(0, len(order), args.batch_size):
+            offsets = range(0, len(order), args.batch_size)
+            batch_bar = tqdm(offsets, desc=f"CIF {epoch}/{args.epochs}",
+                             unit="batch", leave=False)
+            for offset in batch_bar:
                 indices = order[offset:offset + args.batch_size]
                 clean_cpu = make_batch(train_data, indices)
                 masked_cpu = _masked_batch(clean_cpu, args, epoch, offset)
@@ -426,6 +436,8 @@ def main():
                 total += float(loss.detach())
                 mcp_total += float(mcp.detach())
                 batches += 1
+                batch_bar.set_postfix(loss=f"{total / batches:.4f}",
+                                      mcp=f"{mcp_total / batches:.4f}")
 
             view_metrics = evaluate(
                 model, valid_data, args.batch_size, device, evaluation_seed(args), text_encoder,
@@ -438,11 +450,11 @@ def main():
                 row.update({f"{view}_{key}": value for key, value in view_metrics[view].items()})
             writer.writerow(row)
             file.flush()
-            print(f"CIF epoch={epoch:03d} loss={row['train_loss']:.4f} "
-                  f"MCP={row['mcp_loss']:.4f} score={score:.4f} "
-                  f"clean_f1={view_metrics['clean']['macro_f1']:.4f} "
-                  f"local_f1={view_metrics['local']['macro_f1']:.4f} "
-                  f"clean_mae={view_metrics['clean']['mae']:.4f}")
+            tqdm.write(f"CIF epoch={epoch:03d} loss={row['train_loss']:.4f} "
+                       f"MCP={row['mcp_loss']:.4f} score={score:.4f} "
+                       f"clean_f1={view_metrics['clean']['macro_f1']:.4f} "
+                       f"local_f1={view_metrics['local']['macro_f1']:.4f} "
+                       f"clean_mae={view_metrics['clean']['mae']:.4f}")
             if score < best_score:
                 best_score, best_epoch, stale = score, epoch, 0
                 torch.save({"model": model.state_dict(), "epoch": epoch, "seed": args.seed,
@@ -454,7 +466,7 @@ def main():
             else:
                 stale += 1
             if stale >= args.patience:
-                print(f"CIF early stopping at epoch {epoch}; best epoch={best_epoch}")
+                tqdm.write(f"CIF early stopping at epoch {epoch}; best epoch={best_epoch}")
                 break
 
     run = vars(args).copy()

@@ -11,8 +11,9 @@ import torch
 from utils.data import load_main
 from utils.config import parse_config_args
 from scripts.infer import load_model, checkpoint_metadata
-from utils.text import load_text_encoder
-from scripts.train import VIEWS, as_tensors, metrics, predict_split
+from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION,
+                        load_text_encoder, load_text_tokenizer)
+from scripts.train import VIEWS, as_tensors, attach_full_text_inputs, metrics, predict_split
 
 CSV_FIELDS = ("id", "label_class", "label_strength") + tuple(
     f"{view}_{name}" for view in VIEWS
@@ -61,8 +62,16 @@ def main() -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
     model = load_model(args.checkpoint, device, neutral_zero=args.neutral_zero)
-    data = as_tensors(load_main(args.data_root, args.split, need_teacher=model.text_mode == "bert"))
-    text_encoder = load_text_encoder(device) if model.text_mode == "bert" else None
+    bert_finetune = bool(getattr(model, "bert_finetune", False))
+    bert_model_name = getattr(model, "bert_model_name", DEFAULT_BERT)
+    bert_revision = getattr(model, "bert_model_revision", DEFAULT_BERT_REVISION)
+    data = as_tensors(load_main(args.data_root, args.split,
+                                need_teacher=model.text_mode == "bert" and not bert_finetune))
+    if bert_finetune:
+        tokenizer = load_text_tokenizer(bert_model_name, bert_revision)
+        attach_full_text_inputs(data, tokenizer, model.bert_max_length)
+    text_encoder = (load_text_encoder(device, bert_model_name, bert_revision)
+                    if model.text_mode == "bert" and not bert_finetune else None)
     predicted = predict_split(model, data, args.batch_size, device, seed=args.seed,
                               text_encoder=text_encoder, drop=drop,
                               evaluation_protocol=args.evaluation_protocol)

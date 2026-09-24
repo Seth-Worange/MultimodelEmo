@@ -6,6 +6,7 @@ from torch.nn import functional as F
 from utils.data import AUDIO_DIM, SEQ_LEN, TEXT_DIM, VISION_DIM, VOCAB_SIZE
 from .transformer_encoder import TemporalTransformerEncoder
 from .input_processing import AlignedInputProcessing
+from .bert_text import FineTunedBertTextEncoder
 
 
 class AffectiveModel(nn.Module, AlignedInputProcessing):
@@ -14,7 +15,12 @@ class AffectiveModel(nn.Module, AlignedInputProcessing):
                  regression_mode: str = "hard", dropout: float = 0.0,
                  encoder_type: str = "bigru", transformer_layers: int = 1,
                  transformer_heads: int = 4, normalize_inputs: bool = False,
-                 pack_aligned_grus: bool = False):
+                 pack_aligned_grus: bool = False, bert_finetune: bool = False,
+                 bert_model_name: str = "google-bert/bert-base-uncased",
+                 bert_model_revision: str = "86b5e0934494bd15c9632b12f734a8a67f723594",
+                 bert_freeze_bottom_layers: int = 8,
+                 bert_gradient_checkpointing: bool = True,
+                 bert_max_length: int = 512):
         super().__init__()
         if fusion not in {"gate", "concat"}:
             raise ValueError(f"Unknown fusion mode: {fusion}")
@@ -31,6 +37,13 @@ class AffectiveModel(nn.Module, AlignedInputProcessing):
         self.audio_dynamics = audio_dynamics
         self.regression_mode = regression_mode
         self.encoder_type = encoder_type
+        self.bert_finetune = bool(bert_finetune)
+        self.bert_model_name = bert_model_name
+        self.bert_model_revision = bert_model_revision
+        self.bert_freeze_bottom_layers = int(bert_freeze_bottom_layers)
+        self.bert_max_length = int(bert_max_length)
+        if self.bert_finetune and text_mode != "bert":
+            raise ValueError("bert_finetune requires text_mode='bert'")
         self.init_input_processing(normalize_inputs, pack_aligned_grus, AUDIO_DIM, VISION_DIM)
         width = hidden_dim * 2
         if text_mode == "tokens":
@@ -40,6 +53,14 @@ class AffectiveModel(nn.Module, AlignedInputProcessing):
         else:
             self.text_input = nn.Sequential(nn.Linear(TEXT_DIM, width), nn.LayerNorm(width), nn.GELU())
             text_input_dim = width
+            if self.bert_finetune:
+                self.bert_text_encoder = FineTunedBertTextEncoder(
+                    bert_model_name, bert_model_revision, bert_freeze_bottom_layers,
+                    bert_gradient_checkpointing)
+                if self.bert_max_length > self.bert_text_encoder.backbone.config.max_position_embeddings:
+                    raise ValueError("bert_max_length exceeds the pretrained model position limit")
+                self.long_text_projection = nn.Linear(TEXT_DIM, width)
+                self.long_text_scale = nn.Parameter(torch.tensor(0.0))
         audio_dim = AUDIO_DIM * (2 if audio_dynamics else 1)
         self.audio_input = nn.Sequential(nn.Linear(audio_dim, width), nn.LayerNorm(width), nn.GELU())
         self.vision_input = nn.Sequential(nn.Linear(VISION_DIM, width), nn.LayerNorm(width), nn.GELU())
@@ -91,6 +112,9 @@ class AffectiveModel(nn.Module, AlignedInputProcessing):
         audio_mask: torch.Tensor,
         vision_mask: torch.Tensor,
         text_features: torch.Tensor | None = None,
+        bert_input_ids: torch.Tensor | None = None,
+        bert_attention_mask: torch.Tensor | None = None,
+        bert_token_type_ids: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         batch, steps = tokens.shape
         if steps != SEQ_LEN:
@@ -98,10 +122,18 @@ class AffectiveModel(nn.Module, AlignedInputProcessing):
         lengths = lengths.clamp(1, steps).to("cpu", dtype=torch.int64)
         if self.text_mode == "tokens":
             text_input = self.embedding(tokens)
+            tail_context = tail_available = None
+        elif self.bert_finetune:
+            if bert_input_ids is None or bert_attention_mask is None:
+                raise ValueError("bert_finetune requires full-text BERT input ids and attention mask")
+            aligned_text, tail_context, tail_available = self.bert_text_encoder(
+                bert_input_ids, bert_attention_mask, bert_token_type_ids)
+            text_input = self.text_input(aligned_text)
         else:
             if text_features is None or text_features.shape[:2] != tokens.shape:
                 raise ValueError("bert text_mode requires (batch, steps, 768) text_features")
             text_input = self.text_input(text_features)
+            tail_context = tail_available = None
         audio, vision = self.prepare_aligned_inputs(audio, vision, audio_mask, vision_mask)
         audio_values = self._audio_features(audio, audio_mask)
         if self.encoder_type == "bigru":
@@ -134,6 +166,9 @@ class AffectiveModel(nn.Module, AlignedInputProcessing):
         fused_state = self.run_aligned_gru(self.fusion_gru, fused, lengths)
         time_weights = self._masked_softmax(self.pool_score(fused_state).squeeze(-1), valid_steps, dim=1)
         pooled = (fused_state * time_weights.unsqueeze(-1)).sum(dim=1)
+        if tail_context is not None:
+            tail = self.long_text_projection(tail_context)
+            pooled = pooled + torch.tanh(self.long_text_scale) * tail * tail_available.unsqueeze(-1)
         pooled = self.dropout(pooled)
         logits = self.classifier(pooled)
         raw_strength = self.regressor(pooled).squeeze(-1)

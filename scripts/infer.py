@@ -16,7 +16,9 @@ import torch
 from utils.data import prepare_sample, read_pickle, resolve_data_root
 from utils.config import parse_config_args
 from utils.alignment import alignment_coverage, mapped_word_text
-from utils.text import encode_text, load_text_encoder
+from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text,
+                        load_text_encoder, load_text_tokenizer,
+                        mask_full_text_attention, prepare_full_text_inputs)
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel
 from model.cica_net import CICAAffectiveModel
@@ -33,8 +35,15 @@ class ModelEnsemble(torch.nn.Module):
             raise ValueError("Ensemble checkpoints must use the same text mode")
         if any(model.regression_mode != models[0].regression_mode for model in models):
             raise ValueError("Ensemble checkpoints must use the same regression mode")
+        for name in ("bert_finetune", "bert_model_name", "bert_model_revision", "bert_max_length"):
+            if any(getattr(model, name, None) != getattr(models[0], name, None) for model in models):
+                raise ValueError("Ensemble checkpoints must use the same BERT configuration")
         self.text_mode = models[0].text_mode
         self.regression_mode = models[0].regression_mode
+        self.bert_finetune = getattr(models[0], "bert_finetune", False)
+        self.bert_model_name = getattr(models[0], "bert_model_name", DEFAULT_BERT)
+        self.bert_model_revision = getattr(models[0], "bert_model_revision", DEFAULT_BERT_REVISION)
+        self.bert_max_length = getattr(models[0], "bert_max_length", 512)
         self.models = torch.nn.ModuleList(models)
 
     def forward(self, *inputs: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -68,6 +77,22 @@ def build_from_config(config: dict | None) -> torch.nn.Module:
     return AffectiveModel(**config)
 
 
+def load_checkpoint_state(model: torch.nn.Module, state: dict[str, torch.Tensor],
+                          compact_bert: bool) -> None:
+    """还原完整或仅含可训练BERT层的检查点。"""
+    state = fill_legacy_input_buffers(model, state)
+    if not compact_bert:
+        model.load_state_dict(state)
+        return
+    loaded = model.load_state_dict(state, strict=False)
+    trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    prefix = "bert_text_encoder.backbone."
+    expected_missing = {name for name in model.state_dict()
+                        if name.startswith(prefix) and name not in trainable}
+    if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
+        raise RuntimeError("Compact BERT checkpoint does not match its base model configuration")
+
+
 class NeutralZeroModel(torch.nn.Module):
     """可选决策规则：预测类别为中性时，输出强度为零。"""
 
@@ -76,6 +101,10 @@ class NeutralZeroModel(torch.nn.Module):
         self.model = model
         self.text_mode = model.text_mode
         self.regression_mode = model.regression_mode
+        self.bert_finetune = getattr(model, "bert_finetune", False)
+        self.bert_model_name = getattr(model, "bert_model_name", DEFAULT_BERT)
+        self.bert_model_revision = getattr(model, "bert_model_revision", DEFAULT_BERT_REVISION)
+        self.bert_max_length = getattr(model, "bert_max_length", 512)
 
     def forward(self, *inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         output = dict(self.model(*inputs))
@@ -98,7 +127,7 @@ def load_model(path: Path | list[Path], device: torch.device,
         if getattr(model, "fusion", None) == "gate" and "availability_embedding.weight" not in state:
             # 旧权重用零嵌入保持原有预测行为。
             state = {**state, "availability_embedding.weight": model.availability_embedding.weight}
-        model.load_state_dict(fill_legacy_input_buffers(model, state))
+        load_checkpoint_state(model, state, checkpoint.get("compact_bert_state", False))
         models.append(model)
     ensemble = models[0] if len(models) == 1 else ModelEnsemble(models)
     if neutral_zero:
@@ -127,8 +156,12 @@ def tensor_item(item: dict, device: torch.device) -> dict[str, torch.Tensor]:
 
 def run_model(model: torch.nn.Module, batch: dict[str, torch.Tensor], masks: dict[str, torch.Tensor] | None = None):
     use_masks = masks or {name: batch[f"{name}_mask"] for name in MODALITIES}
-    return model(batch["tokens"][:, 0], batch["lengths"], batch["audio"], batch["vision"],
-                 use_masks["text"], use_masks["audio"], use_masks["vision"], batch.get("teacher"))
+    inputs = (batch["tokens"][:, 0], batch["lengths"], batch["audio"], batch["vision"],
+              use_masks["text"], use_masks["audio"], use_masks["vision"], batch.get("teacher"))
+    if getattr(model, "bert_finetune", False):
+        attention = mask_full_text_attention(batch["bert_attention_mask"], use_masks["text"])
+        inputs += (batch["bert_input_ids"], attention, batch.get("bert_token_type_ids"))
+    return model(*inputs)
 
 
 def margin(logits: torch.Tensor, label: int) -> float:
@@ -191,7 +224,7 @@ def explain_one(model: torch.nn.Module, batch: dict[str, torch.Tensor], window: 
             if modality == "text":
                 ablated["tokens"] = batch["tokens"].clone()
                 ablated["tokens"][:, 0, start:end] = 0
-                if model.text_mode == "bert":
+                if model.text_mode == "bert" and not getattr(model, "bert_finetune", False):
                     if text_encoder is None:
                         raise ValueError("Text occlusion requires the frozen BERT encoder")
                     ablated["teacher"] = encode_text(ablated, text_encoder, masks["text"])
@@ -256,7 +289,14 @@ def main() -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
     model = load_model(args.checkpoint, device, neutral_zero=args.neutral_zero)
-    text_encoder = load_text_encoder(device) if model.text_mode == "bert" and args.part == "q3" else None
+    bert_finetune = bool(getattr(model, "bert_finetune", False))
+    bert_model_name = getattr(model, "bert_model_name", DEFAULT_BERT)
+    bert_revision = getattr(model, "bert_model_revision", DEFAULT_BERT_REVISION)
+    bert_max_length = getattr(model, "bert_max_length", 512)
+    tokenizer = (load_text_tokenizer(bert_model_name, bert_revision)
+                 if bert_finetune else None)
+    text_encoder = (load_text_encoder(device, bert_model_name, bert_revision)
+                    if model.text_mode == "bert" and args.part == "q3" and not bert_finetune else None)
     files = find_files(root, args.part, args.input_dir)
     if args.max_samples < 0:
         parser.error("max-samples must be non-negative")
@@ -280,9 +320,15 @@ def main() -> None:
         item = prepare_sample(raw)
         sample_id = item["id"] or path.stem
         batch = tensor_item(item, device)
-        if model.text_mode == "bert" and "teacher" not in batch:
+        if bert_finetune:
+            prepared = prepare_full_text_inputs(
+                {"tokens": batch["tokens"].cpu().numpy(), "raw_text": [item["raw_text"]],
+                 "ids": [sample_id]}, tokenizer, bert_max_length)
+            for key in ("bert_input_ids", "bert_attention_mask", "bert_token_type_ids"):
+                batch[key] = torch.as_tensor(prepared[key], dtype=torch.long, device=device)
+        elif model.text_mode == "bert" and "teacher" not in batch:
             if text_encoder is None:
-                text_encoder = load_text_encoder(device)
+                text_encoder = load_text_encoder(device, bert_model_name, bert_revision)
             tokens = batch["tokens"]
             batch["teacher"] = encode_text(batch, text_encoder)
         with torch.inference_mode():

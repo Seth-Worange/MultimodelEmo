@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import contextlib
 import hashlib
 import json
 import random
@@ -12,12 +13,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tqdm import tqdm
 from torch.nn import functional as F
 
 from utils.augmentation import INTERVAL_RATIOS, drop_modalities, mask_batch
 from utils.config import parse_config_args
 from utils.data import load_main
-from utils.text import encode_text, load_text_encoder
+from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text, load_text_encoder,
+                        load_text_tokenizer, prepare_full_text_inputs)
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel, build_fuse_regularization
 
@@ -32,13 +35,23 @@ def build_model(args) -> torch.nn.Module:
             regression_mode=args.regression_mode, dropout=args.dropout, tau=args.tau,
             encoder_type=args.encoder_type, transformer_layers=args.transformer_layers,
             transformer_heads=args.transformer_heads, normalize_inputs=args.normalize_inputs,
-            pack_aligned_grus=args.pack_aligned_grus)
+            pack_aligned_grus=args.pack_aligned_grus, bert_finetune=args.bert_finetune,
+            bert_model_name=args.bert_model_name,
+            bert_model_revision=args.bert_model_revision,
+            bert_freeze_bottom_layers=args.bert_freeze_bottom_layers,
+            bert_gradient_checkpointing=args.bert_gradient_checkpointing,
+            bert_max_length=args.bert_max_length)
     return AffectiveModel(fusion=args.fusion, text_mode=args.text_mode,
                           audio_dynamics=args.audio_dynamics,
                           regression_mode=args.regression_mode, dropout=args.dropout,
                           encoder_type=args.encoder_type, transformer_layers=args.transformer_layers,
                           transformer_heads=args.transformer_heads, normalize_inputs=args.normalize_inputs,
-                          pack_aligned_grus=args.pack_aligned_grus)
+                          pack_aligned_grus=args.pack_aligned_grus, bert_finetune=args.bert_finetune,
+                          bert_model_name=args.bert_model_name,
+                          bert_model_revision=args.bert_model_revision,
+                          bert_freeze_bottom_layers=args.bert_freeze_bottom_layers,
+                          bert_gradient_checkpointing=args.bert_gradient_checkpointing,
+                          bert_max_length=args.bert_max_length)
 
 
 def model_config(args) -> dict:
@@ -49,7 +62,13 @@ def model_config(args) -> dict:
               "transformer_layers": args.transformer_layers,
               "transformer_heads": args.transformer_heads,
               "normalize_inputs": args.normalize_inputs,
-              "pack_aligned_grus": args.pack_aligned_grus}
+              "pack_aligned_grus": args.pack_aligned_grus,
+              "bert_finetune": args.bert_finetune,
+              "bert_model_name": args.bert_model_name,
+              "bert_model_revision": args.bert_model_revision,
+              "bert_freeze_bottom_layers": args.bert_freeze_bottom_layers,
+              "bert_gradient_checkpointing": args.bert_gradient_checkpointing,
+              "bert_max_length": args.bert_max_length}
     if args.architecture == "fuse":
         return {**common, "tau": args.tau}
     return {**common, "fusion": args.fusion}
@@ -88,13 +107,47 @@ def make_batch(data: dict[str, torch.Tensor], indices: torch.Tensor) -> dict[str
 
 
 def move_inputs(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
-    return {key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
-            for key, value in batch.items()}
+    out = {key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+           for key, value in batch.items()}
+    if "bert_attention_mask" in out:
+        active = torch.where(out["bert_attention_mask"].bool(),
+                             torch.arange(out["bert_attention_mask"].shape[1], device=device), -1)
+        width = int(active.max().item()) + 1
+        for key in ("bert_input_ids", "bert_attention_mask", "bert_token_type_ids"):
+            if key in out:
+                out[key] = out[key][:, :width]
+    return out
 
 
 def model_inputs(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:
-    return (batch["tokens"][:, 0], batch["lengths"], batch["audio"], batch["vision"],
-            batch["text_mask"], batch["audio_mask"], batch["vision_mask"], batch.get("teacher"))
+    inputs = (batch["tokens"][:, 0], batch["lengths"], batch["audio"], batch["vision"],
+              batch["text_mask"], batch["audio_mask"], batch["vision_mask"], batch.get("teacher"))
+    if "bert_input_ids" in batch:
+        inputs += (batch["bert_input_ids"], batch["bert_attention_mask"],
+                   batch.get("bert_token_type_ids"))
+    return inputs
+
+
+def attach_full_text_inputs(data: dict, tokenizer, max_length: int) -> dict:
+    """把完整转写的 BERT 输入加入切分数据。"""
+    prepared = prepare_full_text_inputs(data, tokenizer, max_length)
+    stats = prepared.pop("bert_text_stats")
+    data.update({key: torch.from_numpy(value) for key, value in prepared.items()})
+    return stats
+
+
+def checkpoint_state_dict(model: torch.nn.Module, compact_bert: bool) -> dict[str, torch.Tensor]:
+    """只保存可训练BERT层，并用半精度减小检查点。"""
+    trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    state = {}
+    prefix = "bert_text_encoder.backbone."
+    for name, value in model.state_dict().items():
+        if compact_bert and name.startswith(prefix):
+            if name not in trainable:
+                continue
+            value = value.to(dtype=torch.float16)
+        state[name] = value.detach().cpu().clone()
+    return state
 
 
 def supervised_loss(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
@@ -181,7 +234,9 @@ def build_fixed_view(cpu_batch: dict, view: str, seed: int,
     ids = cpu_batch.get("ids")
     if ids is None or any(not str(value).strip() for value in ids):
         raise ValueError("sample_v2 requires nonempty sample IDs")
-    keys = ("tokens", "audio", "vision", "text_mask", "audio_mask", "vision_mask")
+    keys = ["tokens", "audio", "vision", "text_mask", "audio_mask", "vision_mask"]
+    if "bert_attention_mask" in cpu_batch:
+        keys.append("bert_attention_mask")
     parts = {key: [] for key in keys}
     for row, sample_id in enumerate(ids):
         identity = json.dumps([seed, view, str(sample_id)], ensure_ascii=False).encode("utf-8")
@@ -245,7 +300,9 @@ def predict_split(
     model.eval()
     rng = random.Random(seed)
     gathered = {view: {"logits": [], "sentiment": []} for view in views}
-    for start in range(0, len(data["tokens"]), batch_size):
+    starts = range(0, len(data["tokens"]), batch_size)
+    batch_bar = tqdm(starts, desc="验证", unit="batch", leave=False)
+    for start in batch_bar:
         ix = torch.arange(start, min(start + batch_size, len(data["tokens"])))
         clean_cpu = make_batch(data, ix)
         if drop:
@@ -262,6 +319,7 @@ def predict_split(
             output = model(*model_inputs(batch))
             gathered[view]["logits"].append(output["logits"].cpu().numpy())
             gathered[view]["sentiment"].append(output["sentiment"].cpu().numpy())
+            batch_bar.set_postfix(view=view)
     return {view: {name: np.concatenate(parts) for name, parts in values.items()}
             for view, values in gathered.items()}
 
@@ -284,6 +342,18 @@ def main() -> None:
     parser.add_argument("--fusion", choices=("gate", "concat"), default="gate")
     parser.add_argument("--text-mode", choices=("tokens", "bert"), default="bert",
                         help="使用可训练词嵌入或题目提供的上下文 BERT 特征")
+    parser.add_argument("--bert-finetune", action=argparse.BooleanOptionalAction, default=False,
+                        help="用完整 raw_text 微调 BERT；只允许在附件2训练标签上更新权重")
+    parser.add_argument("--bert-model-name", default=DEFAULT_BERT)
+    parser.add_argument("--bert-model-revision", default=DEFAULT_BERT_REVISION)
+    parser.add_argument("--bert-freeze-bottom-layers", type=int, default=8)
+    parser.add_argument("--bert-learning-rate", type=float, default=2e-5)
+    parser.add_argument("--bert-max-length", type=int, default=512)
+    parser.add_argument("--bert-gradient-checkpointing", action=argparse.BooleanOptionalAction,
+                        default=True)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False,
+                        help="CUDA 下使用 FP16 混合精度")
     parser.add_argument("--audio-dynamics", action="store_true",
                         help="加入相邻有效词位的声学变化特征")
     parser.add_argument("--regression-mode", choices=("signed", "soft", "hard"), default="soft",
@@ -335,10 +405,13 @@ def main() -> None:
             or not 0 <= args.whole_probability <= 1
             or not 0 <= args.overlap_probability <= 1
             or any(not 0 < ratio <= 1 for ratio in args.interval_ratios)
-            or not 0 <= args.local_rate_min <= args.local_rate_max <= 1):
+            or not 0 <= args.local_rate_min <= args.local_rate_max <= 1
+            or args.bert_learning_rate <= 0 or args.bert_freeze_bottom_layers < 0
+            or args.bert_max_length < 50 or args.gradient_accumulation_steps < 1
+            or (args.bert_finetune and args.text_mode != "bert")):
         parser.error("epochs, batch-size, patience and lr must be positive; dropout in [0, 1); "
                      "whole/overlap probability in [0, 1]; interval ratios in (0, 1]; "
-                     "local rate range must satisfy 0 <= min <= max <= 1")
+                     "local rate range must satisfy 0 <= min <= max <= 1; BERT settings must be valid")
 
     seed_everything(args.seed)
     if args.device == "auto":
@@ -350,8 +423,17 @@ def main() -> None:
     print(f"device={device}" + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""))
 
     print("loading aligned_50.pkl train/valid; this file is about 1 GB")
-    train_data = as_tensors(load_main(args.data_root, "train"))
-    valid_data = as_tensors(load_main(args.data_root, "valid"))
+    need_teacher = args.text_mode == "bert" and not args.bert_finetune
+    train_data = as_tensors(load_main(args.data_root, "train", need_teacher=need_teacher))
+    valid_data = as_tensors(load_main(args.data_root, "valid", need_teacher=need_teacher))
+    bert_text_stats = None
+    if args.bert_finetune:
+        tokenizer = load_text_tokenizer(args.bert_model_name, args.bert_model_revision)
+        bert_text_stats = {
+            "train": attach_full_text_inputs(train_data, tokenizer, args.bert_max_length),
+            "valid": attach_full_text_inputs(valid_data, tokenizer, args.bert_max_length),
+        }
+        print("full text prepared for BERT: " + json.dumps(bert_text_stats, ensure_ascii=False))
     model = build_model(args).to(device)
     if args.normalize_inputs:
         model.fit_input_stats(train_data)
@@ -359,12 +441,30 @@ def main() -> None:
     drop = tuple(args.drop_modalities or ())
     if drop:
         print(f"permanently dropping modalities: {', '.join(drop)}")
-    text_encoder = load_text_encoder(device) if args.text_mode == "bert" else None
+    text_encoder = load_text_encoder(device) if need_teacher else None
     counts = np.bincount(train_data["classes"].numpy(), minlength=3)
     class_weights = torch.as_tensor((counts.max() / counts) ** args.class_weight_power,
                                     dtype=torch.float32, device=device)
     class_weights /= class_weights.mean()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    if args.bert_finetune:
+        bert_parameters = [parameter for name, parameter in model.named_parameters()
+                           if name.startswith("bert_text_encoder.") and parameter.requires_grad]
+        task_parameters = [parameter for name, parameter in model.named_parameters()
+                           if not name.startswith("bert_text_encoder.") and parameter.requires_grad]
+        optimizer = torch.optim.AdamW([
+            {"params": bert_parameters, "lr": args.bert_learning_rate},
+            {"params": task_parameters, "lr": args.lr},
+        ], weight_decay=1e-4)
+        print(f"BERT trainable tensors={len(bert_parameters)}; frozen bottom layers="
+              f"{args.bert_freeze_bottom_layers}; BERT lr={args.bert_learning_rate:g}; "
+              f"task lr={args.lr:g}")
+    else:
+        optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad),
+                                      lr=args.lr, weight_decay=1e-4)
+    use_amp = bool(args.amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    if args.amp and not use_amp:
+        print("AMP is enabled only on CUDA; continuing in full precision")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = args.output_dir / "metrics.csv"
     best_score, best_epoch, stale = float("inf"), 0, 0
@@ -376,12 +476,16 @@ def main() -> None:
                                 [f"{view}_{m}" for view in VIEWS
                                  for m in ("accuracy", "macro_f1", "mae", "pearson")])
         writer.writeheader()
-        for epoch in range(1, args.epochs + 1):
+        for epoch in tqdm(range(1, args.epochs + 1), desc="训练轮次", unit="epoch"):
             model.train()
             order = torch.randperm(len(train_data["tokens"]))
             total_loss, batches = 0.0, 0
             reg_totals = {name: 0.0 for name in REG_FIELDS}
-            for offset in range(0, len(order), args.batch_size):
+            batch_offsets = list(range(0, len(order), args.batch_size))
+            optimizer.zero_grad(set_to_none=True)
+            batch_bar = tqdm(batch_offsets, desc=f"Epoch {epoch}/{args.epochs}",
+                             unit="batch", leave=False)
+            for batch_index, offset in enumerate(batch_bar):
                 indices = order[offset:offset + args.batch_size]
                 clean_cpu = make_batch(train_data, indices)
                 if drop:
@@ -401,29 +505,39 @@ def main() -> None:
                 masked = move_inputs(masked_cpu, device)
                 if text_encoder is not None and not torch.equal(masked_cpu["text_mask"], clean_cpu["text_mask"]):
                     masked["teacher"] = encode_text(masked, text_encoder)
-                optimizer.zero_grad(set_to_none=True)
-                clean_out = model(*model_inputs(clean))
-                masked_out = model(*model_inputs(masked))
-                loss = (0.35 * supervised_loss(clean_out, clean, class_weights)
-                        + 0.65 * supervised_loss(masked_out, masked, class_weights)
-                        + 0.05 * consistency_loss(clean_out, masked_out))
-                if args.text_mode == "tokens":
-                    loss += args.distill_weight * distillation_loss(clean_out, clean)
-                if args.architecture == "fuse":
-                    reg = build_fuse_regularization(
-                        model, masked_out, clean_out, masked["classes"], class_weights,
-                        tau=args.tau, kl_beta=args.kl_beta, contrast_weight=args.contrast_weight,
-                        info_weight=args.info_weight, dual_weight=args.dual_weight,
-                        mrc_weight=args.mrc_weight, cross_weight=args.cross_weight)
-                    loss = loss + reg["total"]
-                    for name in REG_FIELDS:
-                        # 某批次没有可用跨模态配对时，该正则项按零计。
-                        reg_totals[name] += float(reg.get(name, reg["total"].new_zeros(())).detach())
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                with (torch.autocast(device_type="cuda", dtype=torch.float16)
+                      if use_amp else contextlib.nullcontext()):
+                    clean_out = model(*model_inputs(clean))
+                    masked_out = model(*model_inputs(masked))
+                    loss = (0.35 * supervised_loss(clean_out, clean, class_weights)
+                            + 0.65 * supervised_loss(masked_out, masked, class_weights)
+                            + 0.05 * consistency_loss(clean_out, masked_out))
+                    if args.text_mode == "tokens":
+                        loss += args.distill_weight * distillation_loss(clean_out, clean)
+                    if args.architecture == "fuse":
+                        reg = build_fuse_regularization(
+                            model, masked_out, clean_out, masked["classes"], class_weights,
+                            tau=args.tau, kl_beta=args.kl_beta, contrast_weight=args.contrast_weight,
+                            info_weight=args.info_weight, dual_weight=args.dual_weight,
+                            mrc_weight=args.mrc_weight, cross_weight=args.cross_weight)
+                        loss = loss + reg["total"]
+                        for name in REG_FIELDS:
+                            reg_totals[name] += float(reg.get(name, reg["total"].new_zeros(())).detach())
+                group_start = (batch_index // args.gradient_accumulation_steps) * args.gradient_accumulation_steps
+                accumulation = min(args.gradient_accumulation_steps,
+                                   len(batch_offsets) - group_start)
+                scaler.scale(loss / accumulation).backward()
+                should_step = ((batch_index + 1) % args.gradient_accumulation_steps == 0
+                               or batch_index + 1 == len(batch_offsets))
+                if should_step:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
                 total_loss += float(loss.detach())
                 batches += 1
+                batch_bar.set_postfix(loss=f"{total_loss / batches:.4f}")
 
             view_metrics = evaluate(
                 model, valid_data, args.batch_size, device, evaluation_seed(args), text_encoder,
@@ -441,20 +555,20 @@ def main() -> None:
                 row.update({f"{view}_{k}": v for k, v in view_metrics[view].items()})
             writer.writerow(row)
             f.flush()
-            print(f"epoch={epoch:03d} loss={row['train_loss']:.4f} score={score:.4f} "
-                  f"clean_f1={view_metrics['clean']['macro_f1']:.4f} "
-                  f"local_f1={view_metrics['local']['macro_f1']:.4f} "
-                  f"whole_f1={view_metrics['whole']['macro_f1']:.4f} "
-                  f"interval_f1={view_metrics['interval']['macro_f1']:.4f} "
-                  f"clean_mae={view_metrics['clean']['mae']:.4f} "
-                  f"local_mae={view_metrics['local']['mae']:.4f} "
-                  f"whole_mae={view_metrics['whole']['mae']:.4f}"
-                  f"{reg_summary}")
+            tqdm.write(f"epoch={epoch:03d} loss={row['train_loss']:.4f} score={score:.4f} "
+                       f"clean_f1={view_metrics['clean']['macro_f1']:.4f} "
+                       f"local_f1={view_metrics['local']['macro_f1']:.4f} "
+                       f"whole_f1={view_metrics['whole']['macro_f1']:.4f} "
+                       f"interval_f1={view_metrics['interval']['macro_f1']:.4f} "
+                       f"clean_mae={view_metrics['clean']['mae']:.4f} "
+                       f"local_mae={view_metrics['local']['mae']:.4f} "
+                       f"whole_mae={view_metrics['whole']['mae']:.4f}"
+                       f"{reg_summary}")
 
             if score < best_score:
                 best_score, best_epoch, stale = score, epoch, 0
                 torch.save({
-                    "model": model.state_dict(),
+                    "model": checkpoint_state_dict(model, args.bert_finetune),
                     "epoch": epoch,
                     "seed": args.seed,
                     "model_config": {"embedding_dim": 96, "hidden_dim": 64, **model_config(args)},
@@ -462,11 +576,13 @@ def main() -> None:
                     "val_score": score,
                     "evaluation_protocol": args.evaluation_protocol,
                     "evaluation_seed": evaluation_seed(args),
+                    "bert_text_stats": bert_text_stats,
+                    "compact_bert_state": args.bert_finetune,
                 }, args.output_dir / "best.pt")
             else:
                 stale += 1
             if stale >= args.patience:
-                print(f"early stopping at epoch {epoch}; best epoch={best_epoch}")
+                tqdm.write(f"early stopping at epoch {epoch}; best epoch={best_epoch}")
                 break
 
     run = vars(args).copy()
@@ -475,6 +591,7 @@ def main() -> None:
     run["output_dir"] = str(args.output_dir)
     run.update({"device_used": str(device), "torch_version": torch.__version__,
                 "cuda_version": torch.version.cuda, "best_epoch": best_epoch,
+                "bert_text_stats": bert_text_stats,
                 "elapsed_seconds": round(time.time() - started, 2)})
     (args.output_dir / "run.json").write_text(json.dumps(run, indent=2), encoding="utf-8")
     print(f"saved {args.output_dir / 'best.pt'}; best_epoch={best_epoch}")

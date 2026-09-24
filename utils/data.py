@@ -69,6 +69,7 @@ def prepare_split(raw: dict[str, Any], *, need_teacher: bool = True) -> dict[str
         "vision_mask": _feature_mask(vision),
         "classes": np.asarray(raw["classification_labels"], dtype=np.int64),
         "sentiment": np.asarray(raw["regression_labels"], dtype=np.float32),
+        "raw_text": [str(item) for item in raw.get("raw_text", [""] * len(tokens))],
         # 样本标识以纯 Python 列表保存，便于错误归因时逐样本落盘。
         "ids": [str(item) for item in raw.get("id", [""] * len(tokens))],
     }
