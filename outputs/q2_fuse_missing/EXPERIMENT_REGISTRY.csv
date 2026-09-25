@@ -1,0 +1,4 @@
+candidate,seed,architecture,normalize_inputs,corruption_probability,corruption_mode,output_dir,status
+B0,2026,fuse,false,0.0,whole,outputs/q2_fuse_missing/B0/s2026,not_run_missing_environment
+B1,2026,fuse,true,0.0,whole,outputs/q2_fuse_missing/B1/s2026,not_run_missing_environment
+B2,2026,fuse,true,0.8,auto,outputs/q2_fuse_missing/B2/s2026,not_run_missing_environment

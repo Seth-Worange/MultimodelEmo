@@ -1,0 +1,25 @@
+train:
+  data_root: data
+  device: cuda
+  epochs: 50
+  batch_size: 32
+  lr: 0.001
+  dropout: 0.2
+  patience: 8
+  seed: 2026
+  output_dir: outputs/q2_fuse_missing/B1/s2026
+  corruption_probability: 0.0
+  corruption_mode: whole
+  normalize_inputs: true
+  architecture: fuse
+  text_mode: bert
+  audio_dynamics: true
+  regression_mode: soft
+  class_weight_power: 0.5
+  tau: 0.1
+  kl_beta: 0.01
+  contrast_weight: 0.1
+  info_weight: 0.1
+  dual_weight: 0.05
+  mrc_weight: 0.1
+  cross_weight: 0.1

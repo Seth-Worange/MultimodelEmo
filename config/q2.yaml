@@ -1,0 +1,57 @@
+train:
+  data_root: data
+  device: cuda
+  epochs: 60
+  batch_size: 32
+  lr: 0.001
+  # 训练样本 3395 条，此前 dropout=0 时最佳轮仅出现在第 1-6 轮，属明显过拟合。
+  dropout: 0.2
+  patience: 8
+  seed: 2026
+  distill_weight: 0.1
+  output_dir: outputs/runs/availability_s2026
+  corruption_probability: 0.8
+  # 缺失形态覆盖：整段丢弃 / 零散短游程（附件3形态）/ 多尺度连续区间（含部分重叠）。
+  # interval_modalities 限定为声画：附件3 实测文本从不缺失，实测该设置优于允许文本缺失。
+  corruption_mode: auto
+  whole_probability: 0.3
+  overlap_probability: 0.5
+  interval_ratios: [0.1, 0.2, 0.4, 0.6]
+  interval_modalities: [audio, vision]
+  local_rate_min: 0.05
+  local_rate_max: 0.45
+  fusion: gate
+  text_mode: bert
+  audio_dynamics: true
+  regression_mode: soft
+  class_weight_power: 0.5
+
+evaluate:
+  checkpoint:
+    - outputs/runs/availability_s2026/best.pt
+    - outputs/runs/availability_s2027/best.pt
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  output: outputs/runs/availability/validation_metrics.json
+  # 逐样本 CSV 必须按划分显式指定，避免 --split test 覆盖验证集的结果。
+
+robustness:
+  checkpoint:
+    - outputs/runs/availability_s2026/best.pt
+    - outputs/runs/availability_s2027/best.pt
+  device: cuda
+  data_root: data
+  batch_size: 64
+  output: outputs/runs/availability/robustness.csv
+
+infer:
+  part: q2
+  checkpoint:
+    - outputs/runs/availability_s2026/best.pt
+    - outputs/runs/availability_s2027/best.pt
+  device: cuda
+  data_root: data
+  output_dir: outputs/predictions_availability
+  max_samples: 0
