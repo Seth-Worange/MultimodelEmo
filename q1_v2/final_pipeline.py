@@ -296,8 +296,9 @@ def process_one(
     record: SampleRecord, *, output_root: Path, qa_root: Path, round5_root: Path,
     config: Q1Config, dictionary: Path, mfa_work_dir: Path,
     face_model: Path, openface_executable: Path,
+    details_dir: str = "smoke_test_details",
 ) -> dict[str, Any]:
-    target = output_root / "smoke_test_details" / record.sample_id
+    target = output_root / details_dir / record.sample_id
     target.mkdir(parents=True, exist_ok=True)
     success = target / "_SUCCESS.json"
     if success.is_file():
@@ -413,17 +414,19 @@ def process_one(
         return failure
 
 
-def write_smoke_summary(output_root: Path, selected: Sequence[str]) -> dict[str, Any]:
+def write_smoke_summary(output_root: Path, selected: Sequence[str], *, details_dir: str = "smoke_test_details",
+                        summary_name: str = "smoke_test_summary.csv",
+                        full100_status: str = "NOT_RUN") -> dict[str, Any]:
     rows = []
     for sample_id in selected:
-        target = output_root / "smoke_test_details" / sample_id
+        target = output_root / details_dir / sample_id
         success, failed = target / "_SUCCESS.json", target / "_FAILED.json"
         rows.append(read_json(success if success.is_file() else failed) if success.is_file() or failed.is_file()
                     else {"sample_id": sample_id, "processing_status": "not_run"})
-    write_csv(output_root / "smoke_test_summary.csv", rows, SUMMARY_FIELDS)
+    write_csv(output_root / summary_name, rows, SUMMARY_FIELDS)
     grades = Counter()
     for row in rows:
-        path = output_root / "smoke_test_details" / row["sample_id"] / "alignment_confidence.json"
+        path = output_root / details_dir / row["sample_id"] / "alignment_confidence.json"
         if path.is_file():
             grades.update(read_json(path)["counts"])
     summary = {
@@ -432,7 +435,7 @@ def write_smoke_summary(output_root: Path, selected: Sequence[str]) -> dict[str,
         "failed_count": sum(row.get("processing_status") == "failed" for row in rows),
         "confidence_counts": dict(grades),
         "meaning": "MFA-ASR disagreement uncertainty, not time-boundary accuracy",
-        "full_100_sample_feature_extraction": "NOT_RUN",
+        "full_100_sample_feature_extraction": full100_status,
     }
     write_json(output_root / "alignment_confidence_summary.json", summary)
     return summary
@@ -454,6 +457,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--sample-id", action="append")
     group.add_argument("--smoke10", action="store_true")
+    group.add_argument("--all", action="store_true",
+                       help="Extract all 100 official samples (authorized full run; details under samples/)")
     args = parser.parse_args(argv)
     if not all(path.is_file() for path in (args.mfa_dictionary, args.mfa_executable,
                                            args.openface_executable, args.face_model)):
@@ -473,9 +478,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                      mfa_work_root=str(args.mfa_work_dir.resolve()))
     official, _ = load_samples(args.data_root, probe_decode=False)
     by_id = {record.sample_id: record for record in official}
-    selected = select_smoke_ids(args.qa_root, args.round5_qa_root) if args.smoke10 else args.sample_id
-    if len(selected) > 10 or len(set(selected)) != len(selected) or any(item not in by_id for item in selected):
-        parser.error("At most 10 unique official sample IDs allowed; no --all extraction")
+    if args.all:
+        selected = sorted(by_id)
+        details_dir, summary_name = "samples", "feature_summary.csv"
+    else:
+        selected = select_smoke_ids(args.qa_root, args.round5_qa_root) if args.smoke10 else args.sample_id
+        details_dir, summary_name = "smoke_test_details", "smoke_test_summary.csv"
+    if not args.all and (len(selected) > 10 or len(set(selected)) != len(selected)
+                         or any(item not in by_id for item in selected)):
+        parser.error("At most 10 unique official sample IDs allowed; use --all for the authorized full run")
+    if args.all and (len(set(selected)) != len(selected) or any(item not in by_id for item in selected)):
+        parser.error("Full run selection must map 1:1 onto official samples")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_root_schemas(args.output_dir, config.visual_backend, config)
     write_json(args.output_dir / "experiment_config.json", {
@@ -487,21 +500,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         "openface_executable_sha256": sha256_file(args.openface_executable),
         "face_model_sha256": sha256_file(args.face_model),
         "environment": collect_environment(),
-        "full_100_sample_feature_extraction": "NOT_RUN",
+        "full_100_sample_feature_extraction": "RUN" if args.all else "NOT_RUN",
     })
     for index, sample_id in enumerate(selected, 1):
         result = process_one(
             by_id[sample_id], output_root=args.output_dir, qa_root=args.qa_root,
             round5_root=args.round5_qa_root, config=config,
             dictionary=args.mfa_dictionary, mfa_work_dir=args.mfa_work_dir,
-            face_model=args.face_model, openface_executable=args.openface_executable)
+            face_model=args.face_model, openface_executable=args.openface_executable,
+            details_dir=details_dir)
         print({"progress": f"{index}/{len(selected)}", **result}, flush=True)
-        write_smoke_summary(args.output_dir, selected)
+        write_smoke_summary(args.output_dir, selected, details_dir=details_dir,
+                            summary_name=summary_name,
+                            full100_status="RUN" if args.all else "NOT_RUN")
         if result.get("processing_status") == "failed":
             # Isolated failure: continue only on an explicitly selected batch.
-            if not args.smoke10:
+            if not (args.smoke10 or args.all):
                 break
-    final = write_smoke_summary(args.output_dir, selected)
+    final = write_smoke_summary(args.output_dir, selected, details_dir=details_dir,
+                                summary_name=summary_name,
+                                full100_status="RUN" if args.all else "NOT_RUN")
     print(final, flush=True)
     return int(final["failed_count"] > 0 or final["completed_with_mfa_failure_count"] > 0)
 

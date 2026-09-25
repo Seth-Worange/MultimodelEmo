@@ -156,15 +156,30 @@ NON_ENGLISH（自动 NON_ENGLISH_SPEECH 字典序首条 `-yRb-Jum7EQ__1`）+
   OpenFace 原生 CSV；全量表取自 label-100.xlsx + 自动 QA），人工标签仅作元信息展示。
 - **部署**：`q1_viz/` 目录整体作为静态站上传 Cloudflare Pages（最大单文件 5 MB 视频 < 20 MiB 上限）；
   仅上传 `index.html` 时数据仍完整，视频区提示需 `assets/videos/`。
+- **全量版更新（2026-09-26）**：①典型样本区改为 5 条可切换（默认 `-THoVjtIkeU__2`）；②逐样本检视
+  覆盖全部 100 条（全量表任意行点击跳转 + 左右按钮/键盘/滑动切换），取消缩略图条；③被路由拦截样本的
+  说明/警告卡移至**视频左侧**并保留模态线索徽章；④100 条逐样本数据按需懒加载（`assets/data/*.json`）；
+  ⑤清除全部 "full100 = NOT_RUN" 文案（实际 100/100 完成）。
 - **图形规范**：细条形、选择性直标、图例、悬停提示、表格孪生；调色板经
   `tools/validate_palette.py`（dataviz 校验器忠实移植，Machado 2009 CVD 矩阵逐元素核对一致）验证通过。
 - **自审方式**：本机 Chrome 无头渲染逐屏截图核对（含关键点叠加、异常样本注解、全量表），
   并用 DOM dump 验证交互状态。
 
-## 8. full100 是否执行
+## 8. full100 全量提取（2026-09-26 获授权后执行）
 
-**`full_100_sample_feature_extraction = NOT_RUN`。** 本轮严格限于 10 条 smoke 样本（CLI 上限 10，无 `--all`）。
-是否进入 full100 待批准（见 §10 建议）。
+**`full_100_sample_feature_extraction = RUN`。** 经授权后 `final_pipeline --all` 完成附件1 全部 100 条样本的
+三模态特征提取，输出 `outputs/q1_v2_full100/`（`samples/<sample_id>/` 逐样本目录 + `feature_summary.csv` +
+schema + `experiment_config.json`）。**100/100 全部 completed，0 失败、0 MFA 失败**：
+
+| MFA 策略 | 条数 | 说明 |
+|---|---|---|
+| NEW_LOCAL_MFA | 68 | 本轮现场真实 MFA 局部对齐 |
+| REUSED_VERIFIED_REAL_MFA | 4 | 复用 round4 已验证真实 MFA（SHA 校验通过） |
+| PROHIBITED_BY_ROUTER | 28 | REVIEW_REQUIRED 9 + INVALID_CORRESPONDENCE 19，保守拦截、零伪造对齐 |
+
+质量路由分布：HIGH_CONFIDENCE_MATCH 72 / REVIEW_REQUIRED 9 / INVALID_CORRESPONDENCE 19；
+词级对齐合计 1474 词，特征包合计约 30.8 MB（`allow_pickle=False` 全部可重读）。
+运行环境与 smoke 轮一致（HF_HOME 指向既有缓存 + HF_HUB_OFFLINE=1，MFA_ROOT_DIR=D:\q1_v2_mfa_root）。
 
 ## 9. 复现命令
 
@@ -195,16 +210,17 @@ $env:HF_HUB_OFFLINE = '1'
 
 ## 10. 未完成与剩余风险
 
-1. **full100 未运行**（设计如此）。若批准，预计可直接用同一入口把上限放宽执行；
-   建议批准前确认附件存储预算（10 条 sample 输出约 26 MB，100 条外推约 250 MB+，
-   提交附件需裁剪至特征包本体）。
+1. **full100 已完成**（2026-09-26 获授权执行，100/100 completed）。提交附件时注意体积：
+   `outputs/q1_v2_full100/` 样本输出约 250 MB（含中间产物），附件需裁剪至特征包本体（约 31 MB）
+   并符合 ≤50 MB 限额。
 2. OpenFace 静态图高检出 ≠ 说话者身份；多脸样本的说话者归属仍未解决（保留人工/后续跟踪）。
 3. extra-speech VAD 规则语义正确但方向准确率未超 R4（同口径 71 条）；5 FPS 场景 QA 未胜出——
    不在本 100 条上继续调参，避免把评估集当训练集。
 4. 配置仍有一处历史分叉：stage-1 `correspondence_qa.QAConfig.visual_probe_fps=2.0` 与
    `Q1Config.visual_probe_fps=5.0` 语义不同（粗探针 vs 场景探针），未强行统一以免改变已验证的
    路由行为；已在代码注释中区分。
-5. 可视化页面未经真实浏览器目检（本机无 Node/浏览器自动化）；资源加载与数据完整性已验证。
+5. 可视化页面已通过本机 Chrome 无头渲染逐屏截图与 DOM dump 验证（关键点叠加、典型样本切换、
+   全量检视导航、左侧警告卡、全量表跳转）；Cloudflare 部署后建议真机再目检一次。
 6. MFA–ASR 分歧等级是不确定性指标，不能当时间对齐精度；人工边界误差才是精度口径（§ROUND5 D）。
 
 ## 11. 交付物
