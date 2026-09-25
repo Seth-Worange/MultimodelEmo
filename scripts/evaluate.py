@@ -14,6 +14,7 @@ from scripts.infer import load_model, checkpoint_metadata
 from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION,
                         load_text_encoder, load_text_tokenizer)
 from scripts.train import VIEWS, as_tensors, attach_full_text_inputs, metrics, predict_split
+from utils.slices import mine_context_pairs, slice_masks
 
 CSV_FIELDS = ("id", "label_class", "label_strength") + tuple(
     f"{view}_{name}" for view in VIEWS
@@ -79,12 +80,37 @@ def main() -> None:
     classes, sentiment = data["classes"].numpy(), data["sentiment"].numpy()
     view_metrics = {view: metrics(classes, sentiment, values["logits"], values["sentiment"])
                     for view, values in predicted.items()}
+    # 语境切片报告：否定族/边界带/强情感子集的表现与语境对照组的一致率。
+    masks = slice_masks(data["raw_text"], classes, sentiment)
+    slice_report = {}
+    for view, values in predicted.items():
+        guess = values["logits"].argmax(axis=1)
+        strength = values["sentiment"]
+        entry = {}
+        for name, mask in masks.items():
+            if not mask.any():
+                continue
+            entry[name] = {"n": int(mask.sum()),
+                           "accuracy": float(np.mean(guess[mask] == classes[mask])),
+                           "mae": float(np.mean(np.abs(sentiment[mask] - strength[mask])))}
+        slice_report[view] = entry
+    pairs = mine_context_pairs(data["raw_text"], classes, sentiment)
+    pair_report = {"n_pairs": len(pairs)}
+    if pairs:
+        left = np.asarray([i for i, _ in pairs])
+        right = np.asarray([j for _, j in pairs])
+        for view, values in predicted.items():
+            strength = values["sentiment"]
+            # 金标已保证 sentiment[left] >= sentiment[right]，看预测强度差方向是否一致。
+            pair_report[f"{view}_order_accuracy"] = float(np.mean(strength[left] >= strength[right]))
+            pair_report[f"{view}_mean_gap"] = float(np.mean(strength[left] - strength[right]))
     result = {"split": args.split, "n": len(data["tokens"]), "views": list(VIEWS),
               "protocol": {"name": args.evaluation_protocol, "seed": args.seed,
                            "batch_size": args.batch_size, "drop_modalities": list(drop),
                            "neutral_zero": args.neutral_zero,
                            "config": str(args.config.resolve()) if args.config else None},
-              "checkpoints": checkpoint_metadata(args.checkpoint), **view_metrics}
+              "checkpoints": checkpoint_metadata(args.checkpoint),
+              "slices": slice_report, "context_pairs": pair_report, **view_metrics}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))

@@ -19,6 +19,7 @@ from torch.nn import functional as F
 from utils.augmentation import INTERVAL_RATIOS, drop_modalities, mask_batch
 from utils.config import parse_config_args
 from utils.data import load_main
+from utils.slices import mine_context_pairs, sample_weights as slice_sample_weights, slice_masks
 from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text, load_text_encoder,
                         load_text_tokenizer, prepare_bert_inputs)
 from model import AffectiveModel
@@ -48,7 +49,7 @@ def build_model(args) -> torch.nn.Module:
             bert_gradient_checkpointing=args.bert_gradient_checkpointing,
             bert_max_length=args.bert_max_length, bert_input_source=args.bert_input_source,
             text_residual=args.text_residual, hierarchical_head=args.hierarchical_head,
-            text_polarity_head=args.text_polarity_head)
+            text_polarity_head=args.text_polarity_head, ordinal_bins=args.ordinal_bins)
     return AffectiveModel(fusion=args.fusion, text_mode=args.text_mode,
                           audio_dynamics=args.audio_dynamics,
                           regression_mode=args.regression_mode, dropout=args.dropout,
@@ -80,7 +81,8 @@ def model_config(args) -> dict:
     if args.architecture == "fuse":
         return {**common, "tau": args.tau, "text_residual": args.text_residual,
                 "hierarchical_head": args.hierarchical_head,
-                "text_polarity_head": args.text_polarity_head}
+                "text_polarity_head": args.text_polarity_head,
+                "ordinal_bins": args.ordinal_bins}
     if args.architecture == "complementary":
         return {key: common[key] for key in (
             "text_mode", "audio_dynamics", "regression_mode", "dropout",
@@ -173,7 +175,7 @@ def initialize_from_frozen_checkpoint(model: torch.nn.Module, path: Path,
     allowed_changes = {"bert_finetune", "bert_freeze_bottom_layers",
                        "bert_gradient_checkpointing", "bert_max_length", "bert_input_source"}
     legacy_defaults = {"text_residual": False, "hierarchical_head": False,
-                       "text_polarity_head": False}
+                       "text_polarity_head": False, "ordinal_bins": 0}
     for key in current.keys() | previous.keys():
         if key not in allowed_changes and current.get(key, legacy_defaults.get(key)) != previous.get(
                 key, legacy_defaults.get(key)):
@@ -193,20 +195,63 @@ def initialize_from_frozen_checkpoint(model: torch.nn.Module, path: Path,
 def supervised_loss(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
                     class_weights: torch.Tensor | None = None,
                     regression_loss: str = "smooth_l1",
-                    magnitude_weight: float = 0.0) -> torch.Tensor:
+                    magnitude_weight: float = 0.0,
+                    sample_weights: torch.Tensor | None = None,
+                    ordinal_bins: int = 0,
+                    ordinal_weight: float = 0.0) -> torch.Tensor:
     # L1直接优化绝对误差；默认保留历史训练目标。
     if regression_loss not in {"smooth_l1", "l1"}:
         raise ValueError(f"Unknown regression loss: {regression_loss}")
     regression = F.l1_loss if regression_loss == "l1" else F.smooth_l1_loss
-    loss = F.cross_entropy(output["logits"], batch["classes"], weight=class_weights) + regression(
-        output["sentiment"], batch["sentiment"]
-    )
+    if sample_weights is None:
+        loss = F.cross_entropy(output["logits"], batch["classes"], weight=class_weights) + regression(
+            output["sentiment"], batch["sentiment"]
+        )
+    else:
+        # 切片加权：逐样本损失乘权重后按权重和归一，权重全 1 时退化为均值。
+        weights = sample_weights.to(output["logits"].dtype)
+        per_sample = (F.cross_entropy(output["logits"], batch["classes"], weight=class_weights,
+                                      reduction="none")
+                      + regression(output["sentiment"], batch["sentiment"], reduction="none"))
+        loss = (per_sample * weights).sum() / weights.sum().clamp_min(1e-8)
     if magnitude_weight:
         nonzero = batch["classes"] != 1
         if nonzero.any():
             loss = loss + magnitude_weight * F.smooth_l1_loss(
                 output["magnitude"][nonzero], batch["sentiment"][nonzero].abs())
+    if ordinal_weight and output.get("ordinal_logits") is not None:
+        loss = loss + ordinal_weight * ordinal_intensity_loss(output, batch, ordinal_bins)
     return loss
+
+
+def ordinal_thresholds(bins: int) -> torch.Tensor:
+    """奇数 K 级的 K-1 个半整数阈值（K=7 时为 -2.5~2.5），把连续强度切成序数级。"""
+    if bins < 3 or bins % 2 == 0:
+        raise ValueError("ordinal bins must be an odd integer >= 3")
+    half = bins // 2
+    return torch.arange(1 - half, half + 1, dtype=torch.float32) - 0.5
+
+
+def ordinal_intensity_loss(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
+                           bins: int) -> torch.Tensor:
+    """累积链接式序数损失：每个阈值一个"y > 阈值"的二分类，显式监督强度序关系。"""
+    logits = output["ordinal_logits"]
+    thresholds = ordinal_thresholds(bins).to(device=logits.device, dtype=logits.dtype)
+    targets = (batch["sentiment"].unsqueeze(-1) > thresholds.unsqueeze(0)).to(logits.dtype)
+    return F.binary_cross_entropy_with_logits(logits, targets)
+
+
+def context_ranking_loss(predicted: torch.Tensor, target: torch.Tensor, margin: float) -> torch.Tensor:
+    """语境对照组排序损失。
+
+    输入按 (P, 2) 成对排列且 target[:, 0] >= target[:, 1]（挖掘时保证）。
+    约束预测强度差不小于金标差（上限 margin），迫使模型以语境而非
+    共有否定短语区分同短语族的正负样本。
+    """
+    paired_pred = predicted.view(-1, 2)
+    paired_target = target.view(-1, 2)
+    gap = (paired_target[:, 0] - paired_target[:, 1]).clamp_min(0).clamp_max(margin)
+    return F.relu(gap - (paired_pred[:, 0] - paired_pred[:, 1])).mean()
 
 
 def distillation_loss(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -320,6 +365,10 @@ def evaluation_seed(args) -> int:
     return 2026 if args.evaluation_protocol == "sample_v2" else args.seed + 9001
 
 
+SLICE_METRIC_NAMES = ("negation_acc", "negation_mae", "boundary_acc", "boundary_mae",
+                      "strong_acc", "strong_mae")
+
+
 @torch.no_grad()
 def evaluate(
     model: torch.nn.Module,
@@ -332,14 +381,28 @@ def evaluate(
     local_rate_range: tuple[float, float] = LOCAL_RATE_RANGE,
     drop: tuple[str, ...] = (),
     evaluation_protocol: str = "legacy_batch",
+    slices: dict[str, np.ndarray] | None = None,
 ) -> dict[str, dict[str, float]]:
     predicted = predict_split(model, data, batch_size, device, text_encoder, views,
                               local_rate_range, seed, drop, evaluation_protocol)
     classes = data["classes"].numpy()
     sentiment = data["sentiment"].numpy()
-    return {view: metrics(classes, sentiment, predicted[view]["logits"],
-                          predicted[view]["sentiment"])
-            for view in views}
+    result = {}
+    for view in views:
+        entry = metrics(classes, sentiment, predicted[view]["logits"], predicted[view]["sentiment"])
+        if slices:
+            guess = predicted[view]["logits"].argmax(axis=1)
+            strength = predicted[view]["sentiment"]
+            for name in ("negation", "boundary", "strong"):
+                mask = np.asarray(slices.get(name, []), dtype=bool)
+                if mask.any():
+                    entry[f"{name}_acc"] = float(np.mean(guess[mask] == classes[mask]))
+                    entry[f"{name}_mae"] = float(np.mean(np.abs(sentiment[mask] - strength[mask])))
+                else:
+                    entry[f"{name}_acc"] = float("nan")
+                    entry[f"{name}_mae"] = float("nan")
+        result[view] = entry
+    return result
 
 
 @torch.no_grad()
@@ -473,6 +536,22 @@ def main() -> None:
     parser.add_argument("--magnitude-weight", type=float, default=0.0)
     parser.add_argument("--supcon-weight", type=float, default=0.0)
     parser.add_argument("--supcon-temperature", type=float, default=0.1)
+    parser.add_argument("--ordinal-bins", type=int, default=0,
+                        help="序数强度分级数（奇数>=3，0关闭；仅 fuse）")
+    parser.add_argument("--ordinal-weight", type=float, default=0.0,
+                        help="序数强度损失权重（仅在 ordinal-bins>0 时生效）")
+    parser.add_argument("--context-pair-weight", type=float, default=0.0,
+                        help="附件2内语境对照组排序损失权重；>0 时挖掘同短语族正负样本对")
+    parser.add_argument("--context-pair-margin", type=float, default=1.0,
+                        help="对照组预测强度差的目标上限")
+    parser.add_argument("--context-pair-batch", type=int, default=16,
+                        help="每个对照组步抽取的样本对数")
+    parser.add_argument("--context-pair-interval", type=int, default=1,
+                        help="每多少个训练批插入一个对照组步")
+    parser.add_argument("--negation-boost", type=float, default=0.0,
+                        help="语境否定族样本的损失加成（加在 1 之上）")
+    parser.add_argument("--boundary-boost", type=float, default=0.0,
+                        help="中性/弱情感边界带 |y|<=0.5 样本的损失加成（加在 1 之上）")
     parser.add_argument("--auxiliary-scale", type=float, default=1.0)
     parser.add_argument("--tau", type=float, default=0.1, help="对比分离的温标（仅 fuse）")
     parser.add_argument("--kl-beta", type=float, default=1e-2, help="变分信息瓶颈 KL 权重（仅 fuse）")
@@ -495,6 +574,14 @@ def main() -> None:
             or not 0 <= args.local_rate_min <= args.local_rate_max <= 1
             or args.auxiliary_scale < 0 or args.magnitude_weight < 0
             or args.supcon_weight < 0 or args.supcon_temperature <= 0
+            or args.ordinal_bins < 0 or (args.ordinal_bins and args.ordinal_bins < 3)
+            or (args.ordinal_bins and args.ordinal_bins % 2 == 0)
+            or args.ordinal_weight < 0 or args.context_pair_weight < 0
+            or args.context_pair_margin <= 0 or args.context_pair_batch < 1
+            or args.context_pair_interval < 1
+            or args.negation_boost < 0 or args.boundary_boost < 0
+            or (args.ordinal_weight and not args.ordinal_bins)
+            or (args.context_pair_weight and args.architecture not in ("fuse", "baseline"))
             or args.bert_warmup_epochs < 0
             or args.bert_learning_rate <= 0 or args.bert_freeze_bottom_layers < 0
             or args.bert_max_length < 50 or args.gradient_accumulation_steps < 1
@@ -503,7 +590,9 @@ def main() -> None:
             or (args.text_polarity_head and not args.hierarchical_head)):
         parser.error("epochs, batch-size, patience and lr must be positive; dropout in [0, 1); "
                      "whole/overlap probability in [0, 1]; interval ratios in (0, 1]; "
-                     "local rate range must satisfy 0 <= min <= max <= 1; BERT settings must be valid")
+                     "local rate range must satisfy 0 <= min <= max <= 1; BERT settings must be valid; "
+                     "ordinal-bins must be 0 or an odd integer >= 3 and requires ordinal-weight; "
+                     "boosts/weights must be nonnegative")
 
     seed_everything(args.seed)
     if args.device == "auto":
@@ -543,6 +632,21 @@ def main() -> None:
     class_weights = torch.as_tensor((counts.max() / counts) ** args.class_weight_power,
                                     dtype=torch.float32, device=device)
     class_weights /= class_weights.mean()
+    # 语境切片：训练用加权与对照组，验证用切片指标（只依赖附件2自身的文本与标签）。
+    train_sample_weights = torch.as_tensor(slice_sample_weights(
+        train_data["raw_text"], train_data["sentiment"],
+        negation_boost=args.negation_boost, boundary_boost=args.boundary_boost))
+    valid_slices = slice_masks(valid_data["raw_text"], valid_data["classes"], valid_data["sentiment"])
+    for name, mask in valid_slices.items():
+        print(f"valid slice {name}: {int(mask.sum())}/{len(mask)}")
+    context_pairs: list[tuple[int, int]] = []
+    if args.context_pair_weight:
+        context_pairs = mine_context_pairs(train_data["raw_text"], train_data["classes"],
+                                           train_data["sentiment"])
+        print(f"mined {len(context_pairs)} context pairs from the training split")
+        if not context_pairs:
+            print("warning: no context pairs mined; context ranking loss disabled")
+    pair_rng = random.Random(args.seed + 7)
     if args.bert_finetune:
         bert_parameters = [parameter for name, parameter in model.named_parameters()
                            if name.startswith("bert_text_encoder.") and parameter.requires_grad]
@@ -573,10 +677,11 @@ def main() -> None:
     started = time.time()
 
     reg_fields = [f"reg_{name}" for name in REG_FIELDS] if args.architecture == "fuse" else []
+    eval_metric_names = ("accuracy", "macro_f1", "mae", "pearson") + SLICE_METRIC_NAMES
     with metrics_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_score", "bert_phase", "bert_lr"] + reg_fields +
                                 [f"{view}_{m}" for view in VIEWS
-                                 for m in ("accuracy", "macro_f1", "mae", "pearson")])
+                                 for m in eval_metric_names])
         writer.writeheader()
         for epoch in tqdm(range(1, args.epochs + 1), desc="训练轮次", unit="epoch"):
             if raw_before_ema is not None:
@@ -622,12 +727,15 @@ def main() -> None:
                       if use_amp else contextlib.nullcontext()):
                     clean_out = model(*model_inputs(clean))
                     masked_out = model(*model_inputs(masked))
+                    batch_weights = train_sample_weights[indices].to(device, non_blocking=True)
                     loss = (args.clean_supervision_weight * supervised_loss(
                                 clean_out, clean, class_weights, args.regression_loss,
-                                                   args.magnitude_weight)
+                                args.magnitude_weight, sample_weights=batch_weights,
+                                ordinal_bins=args.ordinal_bins, ordinal_weight=args.ordinal_weight)
                             + (1 - args.clean_supervision_weight) * supervised_loss(
                                 masked_out, masked, class_weights, args.regression_loss,
-                                                   args.magnitude_weight)
+                                args.magnitude_weight, sample_weights=batch_weights,
+                                ordinal_bins=args.ordinal_bins, ordinal_weight=args.ordinal_weight)
                             + 0.05 * consistency_loss(clean_out, masked_out))
                     if args.text_mode == "tokens":
                         loss += args.distill_weight * distillation_loss(clean_out, clean)
@@ -645,6 +753,19 @@ def main() -> None:
                                 clean_out["pooled"], masked_out["pooled"],
                                 masked["classes"], args.supcon_temperature)
                             loss = loss + args.supcon_weight * contrastive
+                    if context_pairs and args.context_pair_weight and (
+                            batch_index % args.context_pair_interval == 0):
+                        # 语境对照组步：同短语族正负样本对单独成批，约束预测强度差。
+                        count = min(args.context_pair_batch, len(context_pairs))
+                        pair_rows = [context_pairs[i] for i in
+                                     pair_rng.sample(range(len(context_pairs)), count)]
+                        flat = torch.tensor([index for pair in pair_rows for index in pair],
+                                            dtype=torch.long)
+                        pair_batch = move_inputs(make_batch(train_data, flat), device)
+                        pair_out = model(*model_inputs(pair_batch))
+                        ranking = context_ranking_loss(
+                            pair_out["sentiment"], pair_batch["sentiment"], args.context_pair_margin)
+                        loss = loss + args.context_pair_weight * ranking
                 group_start = (batch_index // args.gradient_accumulation_steps) * args.gradient_accumulation_steps
                 accumulation = min(args.gradient_accumulation_steps,
                                    len(batch_offsets) - group_start)
@@ -674,7 +795,8 @@ def main() -> None:
             view_metrics = evaluate(
                 model, valid_data, args.batch_size, device, evaluation_seed(args), text_encoder,
                 evaluation_protocol=args.evaluation_protocol,
-                local_rate_range=(args.local_rate_min, args.local_rate_max), drop=drop)
+                local_rate_range=(args.local_rate_min, args.local_rate_max), drop=drop,
+                slices=valid_slices)
             selected_views = {"clean": view_metrics["clean"]} if args.selection_scope == "clean" else view_metrics
             score = selection_score(selected_views)
             row = {"epoch": epoch, "train_loss": total_loss / max(1, batches), "val_score": score,

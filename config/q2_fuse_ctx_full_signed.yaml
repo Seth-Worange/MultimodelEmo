@@ -1,0 +1,58 @@
+# 消融D：消融C + signed 回归 + L1（解耦强度与分类概率，直接治强度缩水）。
+train:
+  data_root: data
+  device: cuda
+  epochs: 40
+  batch_size: 32
+  lr: 0.001
+  dropout: 0.2
+  patience: 4
+  seed: 2026
+  distill_weight: 0.1
+  output_dir: outputs/diagnostics/context_20260925/fuse_ctx_full_signed_s2026
+  corruption_probability: 0.8
+  corruption_mode: auto
+  whole_probability: 0.3
+  overlap_probability: 0.5
+  interval_ratios: [0.1, 0.2, 0.4, 0.6]
+  interval_modalities: [audio, vision]
+  local_rate_min: 0.05
+  local_rate_max: 0.45
+  architecture: fuse
+  text_mode: bert
+  audio_dynamics: true
+  regression_mode: signed
+  regression_loss: l1
+  class_weight_power: 0.5
+  encoder_type: bigru
+  transformer_layers: 1
+  transformer_heads: 4
+  tau: 0.1
+  kl_beta: 0.01
+  contrast_weight: 0.1
+  info_weight: 0.1
+  dual_weight: 0.05
+  mrc_weight: 0.1
+  cross_weight: 0.1
+  normalize_inputs: true
+  evaluation_protocol: sample_v2
+  evaluation_seed: 2026
+  ordinal_bins: 7
+  ordinal_weight: 0.5
+  context_pair_weight: 0.5
+  context_pair_margin: 1.0
+  context_pair_batch: 16
+  context_pair_interval: 1
+  negation_boost: 1.0
+  boundary_boost: 0.25
+
+evaluate:
+  checkpoint:
+    - outputs/diagnostics/context_20260925/fuse_ctx_full_signed_s2026/best.pt
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  seed: 2026
+  evaluation_protocol: sample_v2
+  output: outputs/diagnostics/context_20260925/fuse_ctx_full_signed_valid.json

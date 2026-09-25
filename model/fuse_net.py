@@ -50,7 +50,7 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
                  bert_gradient_checkpointing: bool = True,
                  bert_max_length: int = 512, bert_input_source: str = "raw_text",
                  text_residual: bool = False, hierarchical_head: bool = False,
-                 text_polarity_head: bool = False):
+                 text_polarity_head: bool = False, ordinal_bins: int = 0):
         super().__init__()
         if text_mode not in {"tokens", "bert"}:
             raise ValueError(f"Unknown text mode: {text_mode}")
@@ -72,6 +72,10 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
         self.text_residual = bool(text_residual)
         self.hierarchical_head = bool(hierarchical_head)
         self.text_polarity_head = bool(text_polarity_head)
+        # 序数强度目标：K 个序数级需要 K-1 个累积阈值头（0 表示关闭）。
+        if ordinal_bins and (ordinal_bins < 3 or ordinal_bins % 2 == 0):
+            raise ValueError("ordinal_bins must be 0 or an odd integer >= 3")
+        self.ordinal_bins = int(ordinal_bins)
         if self.text_polarity_head and not self.hierarchical_head:
             raise ValueError("text_polarity_head requires hierarchical_head")
         if self.bert_finetune and text_mode != "bert":
@@ -159,6 +163,8 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
             self.neutral_classifier = nn.Linear(width, 1)
             self.polarity_classifier = nn.Linear(width, 1)
         self.regressor = nn.Linear(width, 1)
+        if self.ordinal_bins:
+            self.ordinal_head = nn.Linear(width, self.ordinal_bins - 1)
         if self.text_residual:
             self.text_residual_classifier = nn.Linear(width, 3)
             nn.init.zeros_(self.text_residual_classifier.weight)
@@ -320,6 +326,8 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
             text_pooled = masked_mean(encoded["text"], available["text"])
             text_present = available["text"].any(dim=1, keepdim=True).to(logits.dtype)
             logits = logits + self.text_residual_classifier(self.dropout(text_pooled)) * text_present
+        if self.ordinal_bins:
+            ordinal_logits = self.ordinal_head(pooled)
         raw_strength = self.regressor(pooled).squeeze(-1)
         if self.regression_mode == "signed":
             sentiment = 3.0 * torch.tanh(raw_strength)
@@ -347,6 +355,7 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
             "logits": logits,
             "magnitude": magnitude,
             "sentiment": sentiment,
+            "ordinal_logits": ordinal_logits if self.ordinal_bins else None,
             "pooled": pooled,
             "modality_weights": modality_share,
             "time_weights": time_weights,
