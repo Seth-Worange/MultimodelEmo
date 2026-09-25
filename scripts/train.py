@@ -18,7 +18,7 @@ from utils.config import parse_config_args
 from utils.data import load_main
 from utils.normalization import (apply_input_normalization, fit_input_normalization,
                                  normalization_summary)
-from utils.text import encode_text, load_text_encoder
+from utils.text import encode_text
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel, build_fuse_regularization
 
@@ -246,6 +246,10 @@ def predict_split(
             if (view != "clean" and text_encoder is not None
                     and not torch.equal(cpu_batch["text_mask"], clean_cpu["text_mask"])):
                 batch["teacher"] = encode_text(batch, text_encoder)
+            elif (view != "clean" and "teacher" in batch
+                  and not torch.equal(cpu_batch["text_mask"], clean_cpu["text_mask"])):
+                batch["teacher"] = batch["teacher"].clone()
+                batch["teacher"][~batch["text_mask"]] = 0.0
             output = model(*model_inputs(batch))
             gathered[view]["logits"].append(output["logits"].cpu().numpy())
             gathered[view]["sentiment"].append(output["sentiment"].cpu().numpy())
@@ -339,7 +343,9 @@ def main() -> None:
     drop = tuple(args.drop_modalities or ())
     if drop:
         print(f"permanently dropping modalities: {', '.join(drop)}")
-    text_encoder = load_text_encoder(device) if args.text_mode == "bert" else None
+    # aligned_50.pkl already stores frozen 768-dim teacher features. Re-encoding is
+    # only needed when a protocol explicitly masks text and supplies no teacher.
+    text_encoder = None
     counts = np.bincount(train_data["classes"].numpy(), minlength=3)
     class_weights = torch.as_tensor((counts.max() / counts) ** args.class_weight_power,
                                     dtype=torch.float32, device=device)
@@ -380,8 +386,12 @@ def main() -> None:
                 )
                 clean = move_inputs(clean_cpu, device)
                 masked = move_inputs(masked_cpu, device)
-                if text_encoder is not None and not torch.equal(masked_cpu["text_mask"], clean_cpu["text_mask"]):
-                    masked["teacher"] = encode_text(masked, text_encoder)
+                if not torch.equal(masked_cpu["text_mask"], clean_cpu["text_mask"]):
+                    if text_encoder is not None:
+                        masked["teacher"] = encode_text(masked, text_encoder)
+                    elif "teacher" in masked:
+                        masked["teacher"] = masked["teacher"].clone()
+                        masked["teacher"][~masked["text_mask"]] = 0.0
                 optimizer.zero_grad(set_to_none=True)
                 clean_out = model(*model_inputs(clean))
                 masked_out = model(*model_inputs(masked))

@@ -1,5 +1,5 @@
 train:
-  data_root: data
+  data_root: ../data
   device: cuda
   epochs: 60
   batch_size: 32
@@ -38,7 +38,7 @@ evaluate:
     - outputs/runs/fuse_s2026/best.pt
     - outputs/runs/fuse_s2027/best.pt
   split: valid
-  data_root: data
+  data_root: ../data
   device: cuda
   batch_size: 64
   output: outputs/runs/fuse_availability/validation_metrics.json
@@ -48,7 +48,7 @@ robustness:
     - outputs/runs/fuse_s2026/best.pt
     - outputs/runs/fuse_s2027/best.pt
   device: cuda
-  data_root: data
+  data_root: ../data
   batch_size: 64
   output: outputs/runs/fuse_availability/robustness.csv
 
@@ -58,6 +58,6 @@ infer:
     - outputs/runs/fuse_s2026/best.pt
     - outputs/runs/fuse_s2027/best.pt
   device: cuda
-  data_root: data
+  data_root: ../data
   output_dir: outputs/predictions_fuse
   max_samples: 0

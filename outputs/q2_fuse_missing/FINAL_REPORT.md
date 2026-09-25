@@ -1,8 +1,8 @@
 # Q2 Autonomous R&D Final Report
 
-This report is a source freeze of the completed local integration stage. Training and metric
-claims are intentionally pending because the supplied data directory and the documented PyTorch
-CUDA environment are not present in this workspace.
+This report is a source freeze of the completed local integration stage. The supplied data is now
+at `code/data`. The selected Windows environment exists at `D:\\condaData\\envs_dirs\\my_env01`,
+but it currently contains a CPU-only PyTorch build, so GPU training metrics remain pending.
 
 ## Implemented
 
@@ -10,6 +10,14 @@ CUDA environment are not present in this workspace.
 - selective FUSE, data, mask, train, evaluate, robustness, and inference integration;
 - train-only audio/vision normalization with checkpoint persistence;
 - frozen B0/B1/B2 configs, protocol, audit, registry, and focused normalization test.
+- data root corrected to `code/data`; the CPU environment can run without installing
+  `transformers` when precomputed teacher features are present.
+
+## CPU smoke evidence
+
+One epoch completed for B0, B1, and B2. B1 evaluation and a reduced validation robustness
+scan also completed. These runs validate the execution path only and are not final model
+comparisons; they used CPU and one epoch.
 
 ## Pending on the data machine
 

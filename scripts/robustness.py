@@ -21,7 +21,7 @@ from utils.augmentation import INTERVAL_RATIOS, mask_batch
 from utils.data import load_main
 from scripts.infer import load_model
 from utils.config import parse_config_args
-from utils.text import encode_text, load_text_encoder
+from utils.text import encode_text
 from utils.normalization import apply_input_normalization
 from scripts.train import as_tensors, make_batch, metrics, model_inputs, move_inputs
 
@@ -49,8 +49,12 @@ def score_case(model, data, device, batch_size, *, pattern="none", missing_modal
                                ratios=(rate,), interval_modalities=missing_modalities,
                                location=location, overlap_probability=overlap_probability)
         batch = move_inputs(batch, device)
-        if "text" in missing_modalities and text_encoder is not None:
-            batch["teacher"] = encode_text(batch, text_encoder)
+        if "text" in missing_modalities and "teacher" in batch:
+            if text_encoder is not None:
+                batch["teacher"] = encode_text(batch, text_encoder)
+            else:
+                batch["teacher"] = batch["teacher"].clone()
+                batch["teacher"][~batch["text_mask"]] = 0.0
         output = model(*model_inputs(batch))
         logits_all.append(output["logits"].cpu().numpy())
         sentiment_all.append(output["sentiment"].cpu().numpy())
@@ -102,7 +106,7 @@ def main() -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
     model = load_model(args.checkpoint, device)
-    text_encoder = load_text_encoder(device) if model.text_mode == "bert" else None
+    text_encoder = None
     raw_data = load_main(args.data_root, "valid", need_teacher=model.text_mode == "bert")
     if getattr(model, "input_normalization", None) is not None:
         raw_data = apply_input_normalization(raw_data, model.input_normalization)

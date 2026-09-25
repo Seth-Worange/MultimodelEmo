@@ -15,7 +15,8 @@ VISION_DIM = 35
 
 
 def resolve_data_root(path: str | Path | None = None) -> Path:
-    root = Path(path) if path else Path(__file__).resolve().parent.parent / "data"
+    # data is a sibling of the repository directory: code/data alongside code/MultimodelEmo.
+    root = Path(path) if path else Path(__file__).resolve().parents[2] / "data"
     if not (root / "附件2-数据集特征文件").is_dir():
         raise FileNotFoundError(f"Expected 附件2-数据集特征文件 under {root}")
     return root

@@ -13,7 +13,6 @@ import torch
 from utils.data import load_main
 from utils.config import parse_config_args
 from scripts.infer import load_model
-from utils.text import load_text_encoder
 from utils.normalization import apply_input_normalization
 from scripts.train import VIEWS, as_tensors, evaluate, predict_split
 
@@ -65,7 +64,7 @@ def main() -> None:
     if getattr(model, "input_normalization", None) is not None:
         raw_data = apply_input_normalization(raw_data, model.input_normalization)
     data = as_tensors(raw_data)
-    text_encoder = load_text_encoder(device) if model.text_mode == "bert" else None
+    text_encoder = None
     view_metrics = evaluate(model, data, args.batch_size, device, seed=2026,
                             text_encoder=text_encoder, drop=drop)
     result = {"split": args.split, "n": len(data["tokens"]), "views": list(VIEWS), **view_metrics}

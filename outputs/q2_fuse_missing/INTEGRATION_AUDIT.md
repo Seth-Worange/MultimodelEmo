@@ -44,11 +44,11 @@ specialized inference, preventing train/validation leakage and checkpoint mismat
 
 ## Known execution blockers
 
-The checked out workspace has no `data/` directory. The documented Windows environment
-`C:\\Anaconda3\\envs\\pytorch` is absent, and WSL Python 3.14 has no PyTorch, NumPy, pip, or
-pytest. GitHub SSH and HTTPS connections also did not complete in this session. Therefore
-training metrics must be produced on the machine containing the supplied data and CUDA
-environment; no metric is fabricated here.
+The data root is `code\\data` (the configs use `..\\data` when commands run from
+`code\\MultimodelEmo`). The available environment is `D:\\condaData\\envs_dirs\\my_env01`
+(`python.exe`, PyTorch 2.7.1 CPU build, CUDA unavailable). Full GPU training therefore requires
+the same environment with a CUDA build, but CPU smoke checks can run locally. GitHub access is
+outside this work session and is not required for the source validation.
 
 ## Follow-up checks
 

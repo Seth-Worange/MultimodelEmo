@@ -6,30 +6,30 @@
 
 ## 环境
 
-本机环境为 `C:\Anaconda3\envs\pytorch`、PyTorch 2.8.0+cu126、RTX 4060 Laptop GPU：
+本机环境为 `D:\condaData\envs_dirs\my_env01`（当前检测到 PyTorch 2.7.1 CPU 版）：
 
 ```powershell
-& 'C:\Anaconda3\envs\pytorch\python.exe' -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
 依赖清单分为两份：`requirements.txt` 是训练、评估和表格处理的基础依赖；`requirements-q1.txt` 只列第一问音视频特征提取额外需要的 Transformers、WhisperX、MediaPipe 和 OpenCV。这样只跑问题2/3时不必安装体积较大的音视频工具。请在当前 PyTorch 环境中安装，尤其不要让 pip 替换已配置的 CUDA 版 PyTorch：
 
 ```powershell
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m pip install -r requirements.txt
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m pip install -r requirements.txt
 ```
 
 问题1和附件4时间戳定位需要 WhisperX、Transformers、MediaPipe、OpenCV 以及 FFmpeg。安装可选依赖时要保留当前 CUDA 版 PyTorch；首次运行会下载英文BERT和WhisperX对齐模型，或从本地缓存加载。问题1需准备 MediaPipe [Face Landmarker](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker) 和 [Pose Landmarker](https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker) 模型。姿态模型可用官方[下载地址](https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task)，保存为 `task\pose_landmarker_full.task`；提取结果会记录权重 SHA-256，便于复现。
 
 ```powershell
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m pip install -r requirements-q1.txt
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m pip install -r requirements-q1.txt
 ```
 
-默认数据路径为 `data`，人脸和姿态模型分别位于 `task\face_landmarker.task`、`task\pose_landmarker_full.task`。参数集中放在 `config\q1.yaml`、`config\q2.yaml`、`config\q3.yaml`；命令行参数可覆盖配置值。BERT、语音对齐权重和 NLTK 数据默认缓存在 `cache`；只对题目提供的可信 pickle 文件使用 `pickle` 加载器。
+默认数据路径为仓库旁的 `code\data`（在 `MultimodelEmo` 目录运行时写作 `..\data`），人脸和姿态模型分别位于 `task\face_landmarker.task`、`task\pose_landmarker_full.task`。参数集中放在 `config\q1.yaml`、`config\q2.yaml`、`config\q3.yaml`；命令行参数可覆盖配置值。BERT、语音对齐权重和 NLTK 数据默认缓存在 `cache`；只对题目提供的可信 pickle 文件使用 `pickle` 加载器。
 
 ## 问题1：处理附件1的全部100条视频
 
 ```powershell
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.features_q1 --config config\q1.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.features_q1 --config config\q1.yaml
 ```
 
 每条视频生成一个压缩 `.npz`，另有 `manifest.csv` 和 `environment.json`。词时间由 WhisperX 对给定转写做强制对齐；音频为40维 log-Mel 加能量、过零率和基频，共43维帧特征。视觉同时提取面部表情与上半身姿态：16个人脸点相对鼻尖归一化（鼻尖只作原点，不重复输出恒零坐标）；另取双肩、双肘、双腕和双髋共8个姿态点，记录肩宽归一化的三维坐标与可见度。每帧共66维，另有面部/姿态检测位；词区间池化均值与标准差后为132维。最近有效人脸或姿态帧距词边界不超过0.1秒时才补齐，并在 `vision_nearest_mask` 中标记。`face_mask`、`pose_mask` 分别记录词位覆盖，`vision_mask` 记录任一视觉特征有效。另输出12维 `prosody`：词时长、停顿、局部语速、相对音高均值/范围/斜率、浊音比例、能量均值/范围/斜率和过零率。相对音高以该段语音的浊音基频中位数为参照。文本为768维BERT词向量。
@@ -47,15 +47,15 @@
 
 ```powershell
 # 门控基线架构
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config\q2.yaml
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config\q2.yaml --seed 2027 --output-dir outputs\runs\interval_s2027
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config\q2.yaml
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.robustness --config config\q2.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.train --config config\q2.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.train --config config\q2.yaml --seed 2027 --output-dir outputs\runs\interval_s2027
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.evaluate --config config\q2.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.robustness --config config\q2.yaml
 # FUSE-Net 风格三因子分解架构
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config\q2_fuse.yaml
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config\q2_fuse.yaml --seed 2027 --output-dir outputs\runs\fuse_s2027
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config\q2_fuse.yaml
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.robustness --config config\q2_fuse.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.train --config config\q2_fuse.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.train --config config\q2_fuse.yaml --seed 2027 --output-dir outputs\runs\fuse_s2027
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.evaluate --config config\q2_fuse.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.robustness --config config\q2_fuse.yaml
 ```
 
 模型用768维上下文BERT词特征、音频和视觉序列作为输入。附件2已有的 `text` 与本地 `google-bert/bert-base-uncased` 从 `text_bert` 重新编码的结果一致（已逐元素核对，cosine=1.0、MAE=0.0）；附件3没有 `text` 时，推理代码直接用 `text_bert` 的 token id 通过该冻结BERT生成特征，不读取标签，也不要求 `text` 字段。实际检查的附件3中30条文本都可用，29条的音频与视觉逐词掩码完全相同。BERT权重需在 `cache\huggingface` 可用。
@@ -117,7 +117,7 @@
 模型选定后，对独立测试集只评估一次：
 
 ```powershell
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config\q2.yaml --split test --output outputs\runs\availability\test_metrics.json
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.evaluate --config config\q2.yaml --split test --output outputs\runs\availability\test_metrics.json
 ```
 
 旧版测试集 n=727：三分类 clean accuracy 0.6713、macro-F1 0.6277、MAE 0.6251；旧缺失模拟的 masked 结果不用于修正后的方法对比。新模型仅在完成验证集选型后评估测试集。
@@ -129,14 +129,14 @@
 附件3预测：
 
 ```powershell
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q2.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.infer --config config\q2.yaml
 ```
 
 附件4预测及解释（先生成词到时间映射）：
 
 ```powershell
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.align_q3 --config config\q3.yaml
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q3.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.align_q3 --config config\q3.yaml
+& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.infer --config config\q3.yaml
 ```
 
 可用 `--max-samples 1` 先验证接口。
