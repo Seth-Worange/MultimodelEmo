@@ -1,0 +1,56 @@
+# 消融臂 ab_noaug：与 config/q2_fuse_lowaux.yaml 仅差 corruption_probability=0.0。
+# 关闭训练期混合缺失增强，检验增强对缺失鲁棒性的贡献
+evaluate:
+  batch_size: 64
+  checkpoint:
+  - outputs/runs/ab_noaug_s2026/best.pt
+  data_root: data
+  device: cuda
+  evaluation_protocol: sample_v2
+  output: outputs/runs/ab_noaug_s2026/validation_metrics.json
+  seed: 2026
+  split: valid
+train:
+  architecture: fuse
+  audio_dynamics: true
+  auxiliary_scale: 0.1
+  batch_size: 32
+  class_weight_power: 0.5
+  contrast_weight: 0.1
+  corruption_mode: auto
+  corruption_probability: 0.0
+  cross_weight: 0.1
+  data_root: data
+  device: cuda
+  distill_weight: 0.1
+  dropout: 0.2
+  dual_weight: 0.05
+  encoder_type: bigru
+  epochs: 30
+  evaluation_protocol: sample_v2
+  evaluation_seed: 2026
+  info_weight: 0.1
+  interval_modalities:
+  - audio
+  - vision
+  interval_ratios:
+  - 0.1
+  - 0.2
+  - 0.4
+  - 0.6
+  kl_beta: 0.01
+  local_rate_max: 0.45
+  local_rate_min: 0.05
+  lr: 0.001
+  mrc_weight: 0.1
+  normalize_inputs: true
+  output_dir: outputs/runs/ab_noaug_s2026
+  overlap_probability: 0.5
+  patience: 5
+  regression_mode: soft
+  seed: 2026
+  tau: 0.1
+  text_mode: bert
+  transformer_heads: 4
+  transformer_layers: 1
+  whole_probability: 0.3

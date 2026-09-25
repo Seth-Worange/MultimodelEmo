@@ -508,3 +508,29 @@ seed2028配对训练与验证已完成。下一步针对强情感组做signed与
 text-only对照的可复核性说明：`outputs/experiments/text_only_test.json`（clean F1 0.6390）的来源检查点在上一轮清理中已随 `outputs/experiments/text_only/` 删除，用现存 `outputs/runs/text_only/best.pt` 重跑（`--drop-modalities audio vision`）得 clean Acc/F1/MAE/Pearson=0.6768/0.6348/0.6316/0.6749，与历史值差2条样本，故历史数字继续沿用但标注为不可逐位复现；本次重跑结果另存于 `outputs/diagnostics/goal67/q2_text_only_test.json`。
 
 本轮产物：`outputs/diagnostics/goal67/q2_best_test.json`、`q2_best_test.csv`（727行逐样本）、`mixed_ensemble_test.json`、`mixed_ensemble_test.csv`、`q2_old_availability_test.json`、`q2_text_only_test.json`。本轮未训练任何新模型，未改动任何检查点。
+
+## 2026-09-26：问题三条件证据与解释卡复核
+
+保持 `config/q3.yaml` 的四检查点预测器不变，重跑附件4共20条无标签推理；解释器只使用统一预测接口，不读 FUSE 内部层。`scripts.infer` 输出三模态 signed Shapley 与绝对影响份额；`scripts.refine_q3_evidence` 用删除必要性、语义上下文条件增益、文本 Early/Late 双遮蔽、同时间事件三模态删除影响及逐检查点稳定性复核窗口。文本 Early 遮蔽保留 BERT 特殊符号。07、18号虽然整段长转写仅部分进入50位网格，入选事件本身可映射的范围仍按实际匹配词位输出；未覆盖尾段不补造时间。
+
+当前经验随机窗口0.05门槛下，20条中只有07、18号的候选通过全部筛查；其余仅作为可展开的待核候选，不默认高亮。04号的核心窗口仍落在 `Absolutely not.`，但现会连同前面的完整问句显示，并提示当前负向预测可能误解问答否定。这是**发现模型错误的解释诊断**，没有自动改写预测类别。随机窗口经验排名受候选选择和窗口重叠影响，输出头随机化仅一次；它们属于 sanity check，不是人工标注的解释准确率或严格显著性证明。结果见 `outputs/predictions_q3_mixed_neutral/q3_selected_evidence.csv`、`q3_selected_evidence_summary.json` 和 `explanation_cards.html`。运行 `python -m scripts.serve_cards` 可直接打开本地页面。
+
+## 2026-09-26：问题二主线定为 lowaux FUSE，补齐缺失规律与消融全量实验
+
+**主线。** 论文问题二改以 `q2_fuse_lowaux_s2026`（FUSE 因子化结构、gate 融合、辅助正则 0.1、混合缺失增强、sample_v2 选型、best epoch 2）为推荐模型；`q2_fuse_lowaux_s2027` 为种子复核。对应论文结构 4.5 的四个小节，本轮补齐题面"四、结果与提交说明 3.问题2相关内容"中缺失的 (2) 缺失模态类型/缺失率规律分析与消融实验、(3) 附件3全量预测、(4) 验证集基础性能与错误归因，全部结果整理在 `outputs/diagnostics/q2_paper/`。
+
+**实验矩阵。** `scripts.robustness` 按题面"缺失模态类型、缺失位置、缺失时长"三因素扩展后跑全量：1 个完整输入基线 + 4 个整段模态缺失（audio/vision/audio+vision/text）+ local 短游程（音视频，6 档缺失率 × 4 位置）+ interval 连续区间（音视频 6 档 × 4 位置；三模态、text、audio、vision 各自单独缺失在 random 位置 6 档），共 77 情形/检查点，逐情形 Acc/Macro-F1/MAE/Pearson。缺失率取 0.1–0.6（步长0.1），位置 start/middle/end/random，多模态区间含 0.5 概率部分重叠。遮蔽随机源固定 seed=0，各臂逐情形同掩码、配对可比。消融为 6 个单因素臂（`config/q2_fuse_lowaux_ab_*.yaml`，各自只改一个键、同协议同种子 2026 重训并重扫）：`ab_noaug`（增强概率0）、`ab_nofactor`（退回门控基线结构）、`ab_noaux`（辅助正则0）、`ab_aux1`（辅助正则1.0剂量对照）、`ab_nodynamics`（去语音差分）、`ab_nonorm`（去输入标准化）。
+
+**基础性能（验证集四视图，sample_v2）。** clean 0.6415/0.6313/0.5718/0.6723；local 0.6401/0.6255/0.5734/0.6697；whole 0.6277/0.6109/0.5812/0.6609；interval 0.5893/0.5777/0.6172/0.6135（Acc/F1/MAE/Pearson）。错误切片（clean）：负/中/正召回 0.704/0.571/0.642，中性强度MAE 0.302；负向收缩仍在（真值均值 −1.07、预测 −0.46），正向亦偏弱（1.00→0.49）。切片 JSON 见 `q2_paper/q2_error_slices.json`。
+
+**缺失模态类型规律（验证集，seed=0 同掩码）。** 整段缺失：text 全失 F1 塌到 0.3132（−31.8pt、MAE +0.39），audio 全失仅 −1.4pt、vision 全失 −1.0pt、音视频同失 −2.0pt。区间缺失@0.4：text 单独缺失 F1 0.5190，三模态同缺 0.5440，audio 单缺 0.6196、vision 单缺 0.6310、音视频同缺 0.6228（基线 0.6313）。**文本是唯一强依赖模态；音视频缺失影响轻微且大体可被模型补偿。**
+
+**缺失率规律。** 每 +10% 缺失率的 Macro-F1 斜率：interval text **−3.69pt**（MAE +4.2pt/10%）、interval 三模态 −2.46pt、interval 音视频 −0.23pt、local 音视频 −0.16pt、interval audio −0.17pt、interval vision +0.05pt。即**音视频缺失在 0.1–0.6 范围内几乎无退化，文本缺失近似线性陡降**；s2027 复核同型（斜率表 `q2_paper/q2_trend_slopes.csv`）。
+
+**缺失位置规律。** interval 音视频下 start/middle/end/random 在各档缺失率的 F1 全距 ≤0.6pt（rate0.4：0.6265/0.6231/0.6265/0.6228），local 同样平坦——**位置不敏感，缺失长度与模态类型才是主因**。
+
+**消融（各臂 best epoch 均为 2，同协议）。** clean F1 贡献排序：语音差分 −4.2pt（0.5889）、输入标准化 −3.0pt（0.6014）、缺失增强 −2.0pt（0.6112）、因子化结构 −1.1pt（0.6199）、辅助正则剂量（1.0 掉 1.2pt，0 掉 0.1pt，0.1 为甜点）。增强的专门作用看缺失情形：`ab_noaug` 在 interval@0.4 掉 2.3pt（0.6228→0.5999）而在 whole-av 反升（0.6109→0.6184）——**混合缺失增强是区间/游程缺失鲁棒性的主要来源，代价是整段缺失拟合略松**；辅助正则 0.1 相对 0 在 clean 有 +0.06pt 的微弱收益、对缺失情形无损失，剂量 1.0 明显过强。全表 `q2_paper/q2_table_ablation.csv`。
+
+**口径说明。** 本轮训练期间并行工作将选型分数改为 `utils/selection.py` 的三视图口径（clean/local/interval，含 `*_delta_*` 退化列）。已核验主模型在新旧两种口径下最优轮次均为 epoch 2，消融链内部共用新口径自选轮次；论文表格全部使用视图原始指标（Acc/F1/MAE/Pearson），与口径无关。
+
+**产物。** 表：`q2_paper/` 下 `q2_basic_performance.csv`、`q2_table_missing_type.csv`、`q2_table_missing_rate.csv`、`q2_table_missing_location.csv`、`q2_table_ablation.csv`、`q2_trend_slopes.csv`、`q2_robustness_full.csv`（77情形全量）、`q2_error_slices.json`。图：`q2_fig_rate_curve.png`（缺失率曲线）、`q2_fig_missing_type.png`（模态类型）、`q2_fig_location.png`（位置）、`q2_fig_ablation.png`（消融）、`q2_fig_heatmap.png`（类型×缺失率热力图），由 `python -m scripts.figures_q2` 一键再生。附件3：`outputs/predictions_fuse_lowaux/q2_predictions.csv`（30条，主模型直接推理，含缺失模态与融合权重列）。种子复核扫描在 `outputs/runs/q2_fuse_lowaux_s2027/robustness.csv`。

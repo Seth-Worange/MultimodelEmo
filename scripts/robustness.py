@@ -5,7 +5,8 @@
 2. ``whole``：整段模态缺失（``audio``、``vision``、``audio+vision``、``text``）。
 3. ``local``：语音与视觉在相同词位出现多段短游程（附件3的实测形态）。
 4. ``interval``：多尺度连续缺失区间，比例取自 ``--rates``，模态组合覆盖
-   双模态（音视频）、三模态与单模态文本，含部分重叠与非重叠两种放置。
+   双模态（音视频，四位置扫描）、三模态与单模态（text/audio/vision 各自单独缺失），
+   多模态缺失区间含部分重叠放置。
 """
 
 from __future__ import annotations
@@ -73,7 +74,7 @@ def build_cases(rates, locations) -> list[dict]:
         for location in locations:
             cases.append({"pattern": "interval", "missing_modalities": ("audio", "vision"),
                           "missing_rate": rate, "location": location})
-        for names in (("text", "audio", "vision"), ("text",)):
+        for names in (("text", "audio", "vision"), ("text",), ("audio",), ("vision",)):
             cases.append({"pattern": "interval", "missing_modalities": names,
                           "missing_rate": rate, "location": "random"})
     return cases
