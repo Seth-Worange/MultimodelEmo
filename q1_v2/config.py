@@ -28,7 +28,7 @@ class Q1Config:
     n_mels: int = 64
     fmin_hz: float = 50.0
     fmax_hz: float = 500.0
-    visual_fps: float = 5.0
+    visual_fps: float = 10.0
     text_model: str = "google-bert/bert-base-uncased"
     text_pooling: str = "mean"
     text_window_overlap_words: int = 32

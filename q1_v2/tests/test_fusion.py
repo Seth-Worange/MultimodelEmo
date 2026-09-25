@@ -46,12 +46,22 @@ class FusionTests(unittest.TestCase):
         path = Path(__file__).parent / "_test_output"
         path.mkdir(exist_ok=False)
         try:
-            fused = build_fused_sample("id", words, align, text, audio, visual, output_dir=path)
+            fused = build_fused_sample(
+                "id", words, align, text, audio, visual, output_dir=path,
+                correspondence_qa={
+                    "correspondence_status": "PARTIAL_MATCH", "route": "REVIEW_REQUIRED",
+                    "audio_signal_present": True, "speech_present": True,
+                    "video_signal_present": True, "face_present": False,
+                },
+            )
             write_json(path / "_SUCCESS.json", {"sample_id": "id"})
             self.assertEqual(fused.text_features.shape, (2, 3))
             self.assertEqual(fused.audio_word_features.shape, (2, 4))
             valid, errors = validate_fused_output(path, "id")
             self.assertTrue(valid, errors)
+            with np.load(path / "fused_features.npz", allow_pickle=False) as arrays:
+                self.assertEqual(str(arrays["correspondence_status"].item()), "PARTIAL_MATCH")
+                self.assertEqual(int(arrays["face_present"]), 0)
         finally:
             for child in path.iterdir():
                 child.unlink()

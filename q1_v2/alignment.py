@@ -287,7 +287,7 @@ def remap_mfa_words(
 def _run_probe(command: list[str]) -> dict[str, Any]:
     try:
         completed = subprocess.run(
-            command, capture_output=True, text=True, check=False, timeout=60,
+            command, capture_output=True, text=True, check=False, timeout=180,
             encoding="utf-8", errors="replace",
         )
     except FileNotFoundError:

@@ -177,3 +177,47 @@ python -m q1_v2.submission_export --source-root outputs\q1_v2_round3\revised_fus
 ```
 
 导出每条样本仅保存一份含词级和帧级三模态特征、时间、掩码与原始帧索引的 `fused_features.npz`，另附词帧对应元数据、逐词对齐 CSV、视频哈希和来源证明；完整 WAV、MFA 日志、模型权重和各模态重复 NPZ 留在研究输出中。当前体积报告仅适用于已跑样本，不代表 100 条一定小于 50 MB。
+
+## 第四轮：先人工样本审阅表，再轻量对应关系 QA
+
+第四轮的执行顺序是先生成 `outputs/q1_v2_round4/manual_sample_audit_template.csv`（100 个官方样本，不含伪造判断），再运行任何对应关系 QA。自动列在未运行前写 `NOT_EVALUATED` 或留空；后来只刷新自动列，绝不清除人工填写列。`manual_sample_audit_template.csv` 是样本级表，不要求全部100条逐词标时间。结果说明见 [ROUND4_REPORT.md](ROUND4_REPORT.md)。
+
+先在独立 ASR 环境安装 `faster-whisper==1.2.1`、`onnxruntime==1.23.2`、`numpy==2.2.6`，与主 `q1-v2` Conda 环境分进程使用。Windows 本机在单进程混用 Conda 的 `libiomp5md.dll` 与 faster-whisper 的 `libomp.dll` 时发生 OpenMP Error #15；不使用 `KMP_DUPLICATE_LIB_OK`。经独立 Python 3.12 环境调用 `q1_v2.asr_worker`，输入真实16 kHz WAV，运行 Silero VAD 和多语言 `Systran/faster-whisper-base` CPU/int8 ASR。模型来自 [Systran 官方模型卡](https://huggingface.co/Systran/faster-whisper-base)，API 依照 [faster-whisper 官方 README](https://github.com/SYSTRAN/faster-whisper)。ASR 仅用于路由和粗定位，不能替代 Excel 官方文本。
+
+本机可复现的隔离安装方式（`$basePy` 为 Python 3.12，主环境仍由旧 README 的 Conda 步骤建立）：
+
+```powershell
+$basePy = '<Python 3.12 的 python.exe>'
+$asrEnv = 'outputs\q1_v2_round4\asr_env_py312'
+& $basePy -m venv $asrEnv
+& $basePy -m pip --python $asrEnv install -r q1_v2\requirements-q1-v2-asr.txt
+# 如果 Windows/Conda 的 ensurepip 步骤报错但 venv 已创建，仍可用上一条 pip --python 命令引导安装。
+$env:HF_HOME = (Join-Path (Get-Location) 'outputs\q1_v2_round4\models\hf_cache')
+& '<q1-v2环境的python.exe>' -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-base', local_dir='outputs/q1_v2_round4/models/faster-whisper-base')"
+```
+
+PowerShell 中从仓库根目录运行（路径变量均可包含空格）：
+
+```powershell
+$dataRoot = '<附件1根目录>'
+$out = 'outputs\q1_v2_round4'
+$mainPy = '<q1-v2环境的python.exe>'
+$asrPy = '<独立ASR环境的python.exe>'
+$faceModel = 'outputs\q1_v2_round2\models\face_landmarker.task'
+$asrModel = 'outputs\q1_v2_round4\models\faster-whisper-base'
+& $mainPy -m q1_v2.manual_sample_audit --data-root $dataRoot --output-dir $out
+& $mainPy -m q1_v2.round4 --data-root $dataRoot --output-dir $out `
+  --asr-model $asrModel --asr-python $asrPy --face-model $faceModel `
+  --sample-id=-3g5yACwYnA__13 --sample-id=-NFrJFQijFE__1
+# 代表性检查通过后，才允许以下“仅轻量 QA”命令；它不会做100条完整特征提取：
+& $mainPy -m q1_v2.round4 --data-root $dataRoot --output-dir $out `
+  --asr-model $asrModel --asr-python $asrPy --face-model $faceModel --all-qa
+```
+
+需从 [模型卡](https://huggingface.co/Systran/faster-whisper-base) 下载 `Systran/faster-whisper-base` 到 `$asrModel`。本机实际使用 `huggingface_hub.snapshot_download('Systran/faster-whisper-base', local_dir=$asrModel)`；`experiment_config.json` 保存模型 SHA-256、模型路径、版本和阈值。`--sample-id` 以连字符开头时使用 `--sample-id=...`。单条 QA 异常写 `_QA_FAILED.json`，总审计表保留该行及 `UNRESOLVED`。默认视觉最终提取改为10 FPS；5 FPS 仍可由 `--visual-fps 5` 指定。
+
+只有 `HIGH_CONFIDENCE_MATCH` 才用真实 ASR 局部时间片加左右各0.30秒送入 MFA，MFA 局部边界按 `t_global = crop_start_global + t_local` 回到统一样本时间轴。`REVIEW_REQUIRED` 与 `INVALID_CORRESPONDENCE` 不做全段强制对齐，仍保留官方文本、实际声学帧和视觉帧。重复候选、低匹配率、语言不确定等情况保守复核；阈值只是本轮预设，并未在情感标签上优化。单词时间缺失时 `alignment_mask=0`、NaN，不使用均匀切分。
+
+代表性特征命令 `python -m q1_v2.round4_features --data-root ... --output-dir ... --sample-id=<ID> --face-model ... --mfa-dictionary ... --mfa-executable ... --mfa-root-dir ... --mfa-work-dir ...`；接口故意没有 `--all`，且限制最多12条。MediaPipe 只输出原生478个点×xyz + 52个 Blendshape（帧1486维，词级均值/标准差2972维）；并非 OpenFace 68。依据 [MediaPipe 478点文档](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker) 与 [OpenFace 68点输出说明](https://github.com/TadasBaltrusaitis/OpenFace/wiki/Output-Format)，目前没有经过核验的 MediaPipe→OpenFace 68 映射；详见 `outputs/q1_v2_round4/landmark_definition/`。无人脸与无采样帧分别记录，不能把邻近帧计为区间内真实观测。
+
+人工边界只对实际提供参考的可对齐词计算：`python -m q1_v2.manual_validation --manual-xlsx <人工.xlsx> --old-alignment-csv <旧CSV> --new-alignment-csv <局部MFA CSV> --output-dir outputs/q1_v2_round4/manual_validation`。原 Excel 原样复制保存、逐词比较和总体误差分开输出；无人工参考时误差保持 `null`。自动文本匹配率、MFA 覆盖率、人工边界准确率和情感预测准确率是四个不同量。

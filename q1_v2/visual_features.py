@@ -225,7 +225,7 @@ def extract_visual_features(
     *,
     face_model_path: Path,
     selected_landmarks: Sequence[int],
-    sampling_fps: float = 5.0,
+    sampling_fps: float = 10.0,
     max_faces: int = 2,
     min_face_detection_confidence: float = 0.5,
     min_face_presence_confidence: float = 0.5,

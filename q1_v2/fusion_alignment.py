@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -54,6 +54,7 @@ def build_fused_sample(
     visual: VisualFeatureResult,
     *,
     output_dir: Path | None = None,
+    correspondence_qa: Mapping[str, Any] | None = None,
 ) -> FusedSample:
     n_words = len(original_words)
     for name, value in (
@@ -92,7 +93,7 @@ def build_fused_sample(
         visual_word_frame_counts=visual.word_frame_counts,
     )
     if output_dir is not None:
-        save_fused_sample(fused, alignments, audio, visual, output_dir)
+        save_fused_sample(fused, alignments, audio, visual, output_dir, correspondence_qa=correspondence_qa)
     return fused
 
 
@@ -102,11 +103,12 @@ def save_fused_sample(
     audio: AudioFeatureResult,
     visual: VisualFeatureResult,
     output_dir: Path,
+    *,
+    correspondence_qa: Mapping[str, Any] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     multimodal_mask = np.column_stack([fused.text_mask, fused.audio_mask, fused.visual_mask]).astype(np.uint8)
-    np.savez_compressed(
-        output_dir / "fused_features.npz",
+    arrays: dict[str, Any] = dict(
         sample_id=np.asarray(fused.sample_id),
         original_words=np.asarray(fused.original_words, dtype=np.str_),
         word_start_s=fused.word_start_s,
@@ -133,6 +135,15 @@ def save_fused_sample(
         visual_word_valid_face_counts=visual.word_valid_face_counts,
         visual_word_estimated_mask=visual.word_estimated_mask,
     )
+    if correspondence_qa is not None:
+        arrays.update({
+            "correspondence_status": np.asarray(str(correspondence_qa.get("correspondence_status", "UNRESOLVED"))),
+            "audio_signal_present": np.asarray(int(bool(correspondence_qa.get("audio_signal_present"))), dtype=np.uint8),
+            "speech_present": np.asarray(int(bool(correspondence_qa.get("speech_present"))), dtype=np.uint8),
+            "video_signal_present": np.asarray(int(bool(correspondence_qa.get("video_signal_present"))), dtype=np.uint8),
+            "face_present": np.asarray(int(bool(correspondence_qa.get("face_present"))), dtype=np.uint8),
+        })
+    np.savez_compressed(output_dir / "fused_features.npz", **arrays)
     metadata = {
         "sample_id": fused.sample_id,
         "word_count": len(fused.original_words),
@@ -156,6 +167,14 @@ def save_fused_sample(
             "visual_word": int(fused.visual_word_features.shape[1]),
         },
     }
+    if correspondence_qa is not None:
+        metadata["correspondence_qa"] = {
+            key: correspondence_qa.get(key) for key in (
+                "correspondence_status", "route", "correspondence_reason",
+                "matched_audio_start_s", "matched_audio_end_s",
+                "audio_signal_present", "speech_present", "video_signal_present", "face_present",
+            )
+        }
     write_json(output_dir / "fused_metadata.json", metadata)
 
 

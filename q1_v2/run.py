@@ -233,7 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--max-samples", type=int)
     selection.add_argument("--all", action="store_true")
     selection.add_argument("--sample-id", action="append", help="Process one or more exact video_id__clip_id values")
-    parser.add_argument("--visual-fps", type=float, choices=(5.0, 10.0), default=5.0)
+    parser.add_argument("--visual-fps", type=float, choices=(5.0, 10.0), default=10.0)
     parser.add_argument("--face-model", type=Path, default=None)
     parser.add_argument("--text-model", default="google-bert/bert-base-uncased")
     parser.add_argument("--device", default="auto")
