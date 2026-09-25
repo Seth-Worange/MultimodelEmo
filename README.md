@@ -40,7 +40,7 @@
 
 当前推荐推理与验证配置是 `config\q2_best.yaml`，使用四个已训练FUSE检查点；该配置只负责评估、鲁棒性分析和专项推理，单模型训练配置分别保留在实验记录中。附件2 valid 四视图均优于旧门控双模型。
 
-附件3只提供 `text_bert`，没有 `raw_text`；需要对附件3推理的BERT微调方案应在训练、验证和专项测试统一使用 `bert_input_source: text_bert`。这里的 `text_bert` 是token id、attention mask、token type三通道，经可训练BERT得到768维表征。`q2_fuse_bert_finetune.yaml` 的完整转写实验只能作为附件2研究对照，不可直接用其检查点处理附件3。数据、损失与错误切片审计见 [experiment.md](experiment.md)。
+附件3只提供 `text_bert`，没有 `raw_text`；需要对附件3推理的BERT微调方案应在训练、验证和专项测试统一使用 `bert_input_source: text_bert`。这里的 `text_bert` 是token id、attention mask、token type三通道，经可训练BERT得到768维表征。以完整转写作输入的BERT微调实验（已否决，记录见 [experiment.md](experiment.md)）只能作为附件2研究对照，不可直接用其检查点处理附件3。数据、损失与错误切片审计见 [experiment.md](experiment.md)。
 
 ```powershell
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config\q2_best.yaml

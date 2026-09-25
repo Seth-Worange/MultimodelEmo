@@ -466,3 +466,45 @@ seed2028配对训练与验证已完成。下一步针对强情感组做signed与
 配置为`config/q2_fuse_bert_warmstart.yaml`，实现`--init-checkpoint`及结构键严格匹配检查，避免从不相容检查点静默加载。RTX4060 Laptop GPU完成5轮早停，最佳epoch1。独立复评`outputs/runs/q2_fuse_bert_warmstart_s2026/validation_metrics.json`：clean Acc/F1/MAE=0.6456/0.6305/0.5772；local=0.6401/0.6237/0.5785；whole=0.6250/0.6091/0.5860；interval=0.5975/0.5824/0.6293。起始低辅助单模型clean=0.6415/0.6313/0.5718；现有四模型集成clean=0.6566/0.6386/0.5571。故本次未取得全面提升，不替换默认模型。训练损失从epoch1约0.9继续下降，验证选择分数在epoch2至5均劣于epoch1，支持小数据上快速过拟合的判断，但单seed不足以证明普遍规律。
 
 本轮独立验证正常结束并保存最佳检查点；训练结束时，新增的`init_checkpoint`路径未被`run.json`序列化导致训练命令退出码1，已修复该记录问题，历史检查点和`metrics.csv`不受影响。后续优先以训练集内部按视频分组的开发划分检验条件性音视频残差或局部证据聚合；附件2只有3395训练样本、音视觉单模态线性探针valid Acc各约0.459，现有证据不支持盲目增大融合结构。附件3缺少`raw_text`与768维`text`，因此跨附件一致部署仍需以`text_bert`接口或统一重处理视频为准。
+
+## 2026-09-25：outputs 与 config 冗余清理
+
+按"结论已记录在本文、不会再复跑"的原则删除明确淘汰内容；本文上文各条实验结论与数值不受影响。
+
+删除25个被否决实验的配置：`q2_complementary`、`q2_fuse_bert_aligned_finetune`、`q2_fuse_bert_aligned_frozen`、`q2_fuse_bert_finetune`、`q2_fuse_bert_warmstart`、`q2_fuse_ema_ensemble`、`q2_fuse_hierarchical`、`q2_fuse_info_light`、`q2_fuse_l1`、`q2_fuse_lowaux_ema`、`q2_fuse_lowaux_ensemble`、`q2_fuse_magnitude`、`q2_fuse_mixed_availability_ensemble`、`q2_fuse_mixed_norm_ensemble`、`q2_fuse_mixed_safemask_ensemble`、`q2_fuse_noaux`、`q2_fuse_noaux_s2027`、`q2_fuse_signed_slow`、`q2_fuse_soft_slow`、`q2_fuse_specialized_ensemble`、`q2_fuse_supcon`、`q2_fuse_text_polarity`、`q2_fuse_textresidual`、`q3_fuse_clean_train`、`q3_mixed`。本文中指向这些文件的命令行引用保留为历史记录，文件可从 git 历史恢复；`config/` 由49个减至24个，保留 q1/q2/q2_best/cica/fuse/lowaux/mixed_ensemble/neutral/norm系/审计系/q3系全部现役配置。
+
+删除18个被否决 run 的 `best.pt`（约197M：BERT微调四组与l1、supcon、magnitude、textresidual、hierarchical、complementary、info_light、text_polarity、lowaux_ema、noaux双种子、soft_slow、signed_slow、q3_fuse_clean），保留各自 `metrics.csv`、`run.json`、`validation_metrics.json` 作为可复核记录。删除 `outputs/experiments/` 下11个旧检查点子目录（`fuse_s2026/2027`、`fuse2_*`、`fuse_av_*`、`interval_*`、`text/audio/vision_only`，约38M），顶层 `*_test.json`、`*_validation.json`、`*_robustness.csv`、`mix_test.json`、per-sample CSV 等结果记录保留（`mix_test.json` 等引用见上文）。删除 `outputs/diagnostics/goal67/pooled_probe/` 的两个 joblib 探针权重（约141M，"仅是文本诊断"结论见上文；`report.json` 与 `valid_*.npz` 保留）。删除被否决实验的20个顶层训练/评估日志，以及全仓无任何引用的 `outputs/best_gate_architecture_v3.png`。
+
+明确保留：`q2_best.yaml` 引用的四模型检查点与 `runs/main/q3_alignment.json`；`bottleneck_audit_20260924` 的 norm_only/norm_signed 对照检查点；`goal67` 全部 JSON/CSV 报告；`soft_mask_safe`、`exp_bert_audio_dynamics_w05`、`availability*`、`bert_audio_dynamics_ensemble` 历史检查点；全部 `predictions_*` 目录（含 `predictions_q3_mixed` 非中性对照链，其 infer 配置已删但 `q3_evidence_mixed`/`q3_evidence_refine` 保留）；`q2_fuse_missing`（与分支 `shuke/q2-fuse-missing` 关联）；`context_20260925`（当日目标函数实验，最终结论待定）；CICA、`baseline_transformer`、`runs/text_only` 对照检查点。README 中对 `q2_fuse_bert_finetune.yaml` 的引用已同步改为文字描述。
+
+## 2026-09-25：四模型集成附件2 test补测与同协议对照
+
+`config/q2_best.yaml` 的四模型等权集成此前只有附件2 valid记录，test缺测，且历史test对照表所用评估链路与sample_v2不是同一次运行，直接并列会混淆协议差异。本次在本机RTX4060 Laptop GPU、`pytorch`环境补跑test，并把两条对照一并用同一条评估链路重算。
+
+先做可复核性检查：`python -m scripts.evaluate --config config/q2_best.yaml --split valid` 与已存 `outputs/diagnostics/goal67/q2_best_valid.json` 四视图16项指标逐位一致（Acc/F1/MAE/Pearson 全同），说明本机评估链路与历史记录同源，下述test数字可直接与历史test表对照。
+
+附件2 test（n=727，sample_v2 / seed2026）：
+
+| 配置 | 视图 | Acc | macro-F1 | MAE | Pearson |
+|---|---|---|---|---|---|
+| 四模型集成，中性置零（`q2_best_test.json`） | clean | 0.6685 | 0.6330 | 0.6215 | 0.6668 |
+| 同上 | local | 0.6699 | 0.6349 | 0.6207 | 0.6663 |
+| 同上 | whole | 0.6671 | 0.6324 | 0.6274 | 0.6575 |
+| 同上 | interval | 0.6314 | 0.5863 | 0.6552 | 0.6291 |
+| 四模型集成，不置零（`mixed_ensemble_test.json`） | clean | 0.6685 | 0.6330 | 0.6283 | 0.6704 |
+| 同上 | interval | 0.6314 | 0.5863 | 0.6596 | 0.6334 |
+| 旧门控双种子（`q2_old_availability_test.json`） | clean | 0.6699 | 0.6351 | 0.6085 | 0.6939 |
+| 同上 | whole | 0.6726 | 0.6374 | 0.6103 | 0.6910 |
+| 同上 | interval | 0.6410 | 0.6064 | 0.6640 | 0.6360 |
+
+中性置零只改回归输出，不改分类，因此两版Acc/F1相同，MAE/Pearson不同。
+
+对照的可复核性：旧门控双种子（`availability_s2026`+`availability_s2027`）按sample_v2重算，clean与whole四指标与历史 `outputs/runs/availability/test_metrics.json` 逐位一致；local不一致（历史F1 0.6464、本次0.6323），历史记录无interval视图，差异应来自当时局部扰动的实现或随机源。以下对照以clean为准，同一链路重算的local/interval随附。
+
+**核心结论：四模型集成在valid上的优势没有迁移到test。** 与旧门控双种子相比，valid clean是明显改善（Acc 0.6566 vs 0.6319、F1 0.6386 vs 0.6192、MAE 0.5571 vs 0.5804）；但test clean为Acc 0.6685 vs 0.6699（−0.14个百分点）、F1 0.6330 vs 0.6351（−0.21个百分点）、MAE 0.6283 vs 0.6085（不置零差0.0198，置零后0.6215仍差0.0130）、Pearson 0.6704 vs 0.6939（−0.0335）。即test上旧门控双种子在分类、回归、相关三项上都不劣于四模型集成；interval视图四模型同样更低（F1 0.5863 vs 0.6064）。历史text-only单模态test clean macro-F1 0.6390仍高于上述两者。
+
+这与本文此前"不能依赖在同一验证集上不断搜索集成组合制造虚高结果"的判断一致：四模型是在同一valid上选出来的组合，valid增益属选择内增益，test上未复现。**旧门控双种子仍是可追溯的最佳test多模态结果（clean Acc 0.6699 / F1 0.6351 / MAE 0.6085 / Pearson 0.6939）**；四模型集成的定位应是"附件2 valid选模与附件3/4推理的现役配置"，不能写成test更优。若要宣称test更优，需要在训练集内部按视频来源划分开发/校准集，在该内部划分上选定集成成员后只在test上评一次。
+
+text-only对照的可复核性说明：`outputs/experiments/text_only_test.json`（clean F1 0.6390）的来源检查点在上一轮清理中已随 `outputs/experiments/text_only/` 删除，用现存 `outputs/runs/text_only/best.pt` 重跑（`--drop-modalities audio vision`）得 clean Acc/F1/MAE/Pearson=0.6768/0.6348/0.6316/0.6749，与历史值差2条样本，故历史数字继续沿用但标注为不可逐位复现；本次重跑结果另存于 `outputs/diagnostics/goal67/q2_text_only_test.json`。
+
+本轮产物：`outputs/diagnostics/goal67/q2_best_test.json`、`q2_best_test.csv`（727行逐样本）、`mixed_ensemble_test.json`、`mixed_ensemble_test.csv`、`q2_old_availability_test.json`、`q2_text_only_test.json`。本轮未训练任何新模型，未改动任何检查点。
