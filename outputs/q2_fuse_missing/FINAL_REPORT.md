@@ -26,6 +26,10 @@ neutral-class F1 and regression magnitude bins, then repeat only the selected ca
 2027 and 2028. Populate `final_summary.csv`, `final_multiseed_summary.csv`, plots, and this report
 with measured values. The test split is evaluated once after selection.
 
+The current run has completed B0/B1/B2, LR screening, and final seed 2027. Seed 2028, final
+three-seed aggregation, final diagnostics, and source freeze remain for the handoff described in
+`HANDOFF_FOR_TEAMMATE.md`.
+
 ## Integrity statement
 
 No test-set selection, fabricated metric, push, merge, force push, or remote PR was performed.

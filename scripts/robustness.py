@@ -79,6 +79,17 @@ def build_cases(rates, locations) -> list[dict]:
         for names in (("text", "audio", "vision"), ("text",)):
             cases.append({"pattern": "interval", "missing_modalities": names,
                           "missing_rate": rate, "location": "random"})
+    # Frozen R1-R5 protocol cases used for candidate acceptance. Keep them explicit
+    # so single-vision and text+vision intervals cannot disappear from the scan.
+    for rate, names in (
+        (0.4, ("audio", "vision")),
+        (0.4, ("text",)),
+        (0.4, ("vision",)),
+        (0.4, ("text", "vision")),
+        (0.6, ("audio", "vision")),
+    ):
+        cases.append({"pattern": "interval", "missing_modalities": names,
+                      "missing_rate": rate, "location": "middle"})
     return cases
 
 
