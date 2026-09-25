@@ -138,21 +138,28 @@ NON_ENGLISH（自动 NON_ENGLISH_SPEECH 字典序首条 `-yRb-Jum7EQ__1`）+
 4. 对齐置信度汇总：LOW 24 / MEDIUM 38 / HIGH 36 / UNAVAILABLE 118（UNAVAILABLE 主要来自 4 条无对齐样本的词）。
 5. 中断轮产物完整保留于 `outputs/q1_v2_round5_1/interrupted_run_20260925/`（含 5 条失败样本的 `_FAILED.json`）。
 
-## 7. 可视化页面（`q1_viz/`）
+## 7. 可视化页面（`q1_viz/`，最终版）
 
-- 结构：`src/`（style.css、charts.js 手写 SVG、main.js）、`public/`（`frontend_data.json` + 真实视频帧）、
-  `tools/build_frontend_data.py`（数据生成）、`tools/validate_palette.py`（调色板校验 Python 移植）、
-  `package.json`（`npm install` / `npm run dev`，Vite 开发服务器；亦可用 `python -m http.server`）。
-- 页面模块：处理流程 → 数据质量总览（图1）→ Correspondence QA（图2 安全路由 / 图3 混淆矩阵 + extra-speech 表）
-  → 时序对齐（图4 MFA vs 人工词边界 + 音频包络 + 真实视频帧）→ OpenFace68（图5 68 点拓扑 + 特征块 / 图6 后端对照）
-  → 样本浏览器（10 样本质量标志、掩码维度、词级对齐）。
-- **数据不硬编码**：全部数值由 `build_frontend_data.py` 从 `outputs/` 实验产物生成，
-  页面 footer 列出来源文件。人工标签仅作为评估证据展示。
-- 图表规范：≤24px 细条形、数据端 4px 圆角、2px 表面间隙、实线发丝网格、≥2 系列配图例、
-  选择性直标、悬停提示 + 表格孪生；调色板（参考实例 slots 1–3）经六项计算校验通过
-  （全对 CVD ΔE 9.2 浅色 / 9.4 深色，正常视觉 24.0 / 20.9，与基准文档一致）。
-- 局限：本机无 Node.js 与浏览器自动化，`npm run dev` 未在本机实测（Vite 标准配置）；
-  已用 `python -m http.server` 验证全部资源 HTTP 200 与 JSON 完整性；投屏前建议本机打开目检一次。
+轻度苹果风 + 柔和活力色彩的单页展示（`index.html`，CSS/JS/展示数据全部内联，无构建步骤）：
+
+- **结构**：磨砂玻璃导航 → 居中大标题 + 16:9 圆角主视频播放器（典型样本，**首帧即渲染 68 点关键点
+  拓扑叠加层**，可开关，实时跟随播放）→ 文本时间戳对齐词条（点击跳转）→ 6 张 KPI 大数字卡 →
+  Bento 网格（人工 QA 环图 / 安全路由 2×2 / Correspondence QA / 时序对齐通过率 / 置信度 / 视觉 QA /
+  声学时频图 + 波形 / OpenFace68 四块 + AU 均值）→ 处理流程 → **逐样本检视器**（10 条）→ 全量 100 条表。
+- **逐样本检视**（核心）：每条视频呈现 ①脸部关键点提取（像素坐标实时叠加，含拓扑连线）②文本时间戳对齐
+  （MFA/人工参考/ASR 三轨时间轴，点击跳转）③声音特征（波形 + 播放头 + F0/RMS/ZCR/频谱质心）；
+  并按模态可用性显示 ✓/△/✕ 线索徽章。特殊情况逐条说明：文本-音频疑似不一致（`-s9qJ7ATP7w__6`、
+  `-AUZQgSxyPQ__2`，保守拦截 + 人脸/ASR 线索保留）、无语音+无脸（`-NFrJFQijFE__1`，保留文本/声学底噪
+  线索）、非英语（`-yRb-Jum7EQ__1`，保留 49 词文本 + 292/293 帧人脸）、静态人物图（`-UuX1xuaiiE__1`）、
+  低视觉覆盖（`-HwX2H8Z4hY__5`）。支持 `index.html#sample=<id>` 单样本深链。
+- **数据不硬编码**：`tools/build_site_data.py` 从 `outputs/` 实验产物生成（关键点像素坐标取自
+  OpenFace 原生 CSV；全量表取自 label-100.xlsx + 自动 QA），人工标签仅作元信息展示。
+- **部署**：`q1_viz/` 目录整体作为静态站上传 Cloudflare Pages（最大单文件 5 MB 视频 < 20 MiB 上限）；
+  仅上传 `index.html` 时数据仍完整，视频区提示需 `assets/videos/`。
+- **图形规范**：细条形、选择性直标、图例、悬停提示、表格孪生；调色板经
+  `tools/validate_palette.py`（dataviz 校验器忠实移植，Machado 2009 CVD 矩阵逐元素核对一致）验证通过。
+- **自审方式**：本机 Chrome 无头渲染逐屏截图核对（含关键点叠加、异常样本注解、全量表），
+  并用 DOM dump 验证交互状态。
 
 ## 8. full100 是否执行
 
