@@ -195,7 +195,7 @@ class CICAAffectiveModel(nn.Module, AlignedInputProcessing):
         return {"text": text_mask.bool(), "audio": audio_mask.bool(),
                 "vision": vision_mask.bool()}
 
-    def _fuse(self, states, branch, available):
+    def _fuse(self, states, branch, available, lengths):
         stacked = torch.stack([states[name] for name in MODALITIES], dim=2)
         masks = torch.stack([available[name] for name in MODALITIES], dim=2)
 
@@ -256,7 +256,7 @@ class CICAAffectiveModel(nn.Module, AlignedInputProcessing):
             states = self.encode_modalities(
                 tokens, lengths, audio, vision, audio_mask, vision_mask, text_features)
             branch = self._branch_outputs(states, available)
-        return self._fuse(states, branch, available)
+        return self._fuse(states, branch, available, lengths)
 
     def forward(self, tokens, lengths, audio, vision, text_mask, audio_mask, vision_mask,
                 text_features=None):
@@ -264,7 +264,7 @@ class CICAAffectiveModel(nn.Module, AlignedInputProcessing):
         states = self.encode_modalities(
             tokens, lengths, audio, vision, audio_mask, vision_mask, text_features)
         branch = self._branch_outputs(states, available)
-        return self._fuse(states, branch, available)
+        return self._fuse(states, branch, available, lengths)
 
     def confidence_loss(self, modality: str, confidence: torch.Tensor) -> torch.Tensor:
         return self.confidence_calibration[modality](confidence)

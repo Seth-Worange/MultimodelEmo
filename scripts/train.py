@@ -19,6 +19,7 @@ from torch.nn import functional as F
 from utils.augmentation import INTERVAL_RATIOS, drop_modalities, mask_batch
 from utils.config import parse_config_args
 from utils.data import load_main
+from utils.selection import MAIN_VIEWS, relative_degradation, selection_score
 from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text, load_text_encoder,
                         load_text_tokenizer, prepare_bert_inputs)
 from model import AffectiveModel
@@ -284,13 +285,6 @@ def build_view(cpu_batch: dict[str, torch.Tensor], view: str, seed: int,
     raise ValueError(f"Unknown view: {view}")
 
 
-def selection_score(view_metrics: dict[str, dict[str, float]]) -> float:
-    """模型选择分数，越低越好：传入视图的 MAE 与 macro-F1 等权平均。"""
-    mae = float(np.mean([m["mae"] for m in view_metrics.values()])) / 3.0
-    f1 = 1.0 - float(np.mean([m["macro_f1"] for m in view_metrics.values()]))
-    return 0.5 * mae + 0.5 * f1
-
-
 def build_fixed_view(cpu_batch: dict, view: str, seed: int,
                      local_rate_range: tuple[float, float] = LOCAL_RATE_RANGE) -> dict:
     """按样本标识固定缺失位置，不随批量大小、顺序或训练种子改变。"""
@@ -405,7 +399,8 @@ def main() -> None:
     parser.add_argument("--distill-weight", type=float, default=0.1)
     parser.add_argument("--corruption-probability", type=float, default=0.75)
     parser.add_argument("--clean-supervision-weight", type=float, default=0.35)
-    parser.add_argument("--selection-scope", choices=("all", "clean"), default="all")
+    parser.add_argument("--selection-scope", choices=("task", "all", "clean"), default="task",
+                        help="task 用 clean/local/interval 选模；all 保留旧四视图规则")
     parser.add_argument("--ema-decay", type=float, default=0.0,
                         help="大于0时用参数指数滑动平均权重验证和保存检查点")
     parser.add_argument("--fusion", choices=("gate", "concat"), default="gate")
@@ -483,6 +478,7 @@ def main() -> None:
     parser.add_argument("--cross-weight", type=float, default=0.1,
                         help="用可用模态重建缺失模态的交叉重建权重（仅 fuse）")
     args = parse_config_args(parser, "train")
+    selection_views = {"task": MAIN_VIEWS, "all": VIEWS, "clean": ("clean",)}[args.selection_scope]
     if (args.epochs < 1 or args.batch_size < 1 or args.patience < 1 or args.lr <= 0
             or not 0 <= args.dropout < 1 or args.class_weight_power < 0
             or args.transformer_layers < 1 or args.transformer_heads < 1
@@ -576,7 +572,9 @@ def main() -> None:
     with metrics_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_score", "bert_phase", "bert_lr"] + reg_fields +
                                 [f"{view}_{m}" for view in VIEWS
-                                 for m in ("accuracy", "macro_f1", "mae", "pearson")])
+                                 for m in ("accuracy", "macro_f1", "mae", "pearson")] +
+                                [f"{view}_delta_{metric}" for view in ("local", "interval")
+                                 for metric in ("macro_f1", "mae")])
         writer.writeheader()
         for epoch in tqdm(range(1, args.epochs + 1), desc="训练轮次", unit="epoch"):
             if raw_before_ema is not None:
@@ -675,8 +673,7 @@ def main() -> None:
                 model, valid_data, args.batch_size, device, evaluation_seed(args), text_encoder,
                 evaluation_protocol=args.evaluation_protocol,
                 local_rate_range=(args.local_rate_min, args.local_rate_max), drop=drop)
-            selected_views = {"clean": view_metrics["clean"]} if args.selection_scope == "clean" else view_metrics
-            score = selection_score(selected_views)
+            score = selection_score(view_metrics, selection_views)
             row = {"epoch": epoch, "train_loss": total_loss / max(1, batches), "val_score": score,
                    "bert_phase": phase, "bert_lr": args.bert_learning_rate if phase == "joint" else 0.0}
             reg_summary = ""
@@ -687,6 +684,8 @@ def main() -> None:
                                                   for name in REG_FIELDS) + "]"
             for view in VIEWS:
                 row.update({f"{view}_{k}": v for k, v in view_metrics[view].items()})
+            for view, changes in relative_degradation(view_metrics).items():
+                row.update({f"{view}_{key}": value for key, value in changes.items()})
             writer.writerow(row)
             f.flush()
             tqdm.write(f"epoch={epoch:03d} loss={row['train_loss']:.4f} score={score:.4f} "
@@ -708,6 +707,7 @@ def main() -> None:
                     "model_config": {"embedding_dim": 96, "hidden_dim": 64, **model_config(args)},
                     "val_views": view_metrics,
                     "val_score": score,
+                    "selection_views": list(selection_views),
                     "evaluation_protocol": args.evaluation_protocol,
                     "evaluation_seed": evaluation_seed(args),
                     "bert_text_stats": bert_text_stats,
@@ -731,6 +731,7 @@ def main() -> None:
     run["init_checkpoint"] = str(args.init_checkpoint) if args.init_checkpoint else None
     run.update({"device_used": str(device), "torch_version": torch.__version__,
                 "cuda_version": torch.version.cuda, "best_epoch": best_epoch,
+                "selection_views": list(selection_views),
                 "warm_start": warm_start,
                 "bert_text_stats": bert_text_stats,
                 "elapsed_seconds": round(time.time() - started, 2)})

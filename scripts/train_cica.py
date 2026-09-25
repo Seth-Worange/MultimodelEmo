@@ -17,10 +17,11 @@ from model.cica_net import CICAAffectiveModel, MODALITIES
 from utils.augmentation import INTERVAL_RATIOS, mask_batch
 from utils.config import parse_config_args
 from utils.data import load_main
+from utils.selection import MAIN_VIEWS, relative_degradation, selection_score
 from utils.text import encode_text, load_text_encoder
 from scripts.train import (
     LOCAL_RATE_RANGE, VIEWS, as_tensors, build_view, evaluate, make_batch,
-    metrics, model_inputs, move_inputs, seed_everything, selection_score, evaluation_seed,
+    metrics, model_inputs, move_inputs, seed_everything, evaluation_seed,
 )
 
 CAP_PREFIXES = (
@@ -396,7 +397,9 @@ def main():
     with metrics_path.open("w", newline="", encoding="utf-8") as file:
         fields = ["epoch", "train_loss", "mcp_loss", "val_score"] + [
             f"{view}_{key}" for view in VIEWS
-            for key in ("accuracy", "macro_f1", "mae", "pearson")]
+            for key in ("accuracy", "macro_f1", "mae", "pearson")] + [
+            f"{view}_delta_{metric}" for view in ("local", "interval")
+            for metric in ("macro_f1", "mae")]
         writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
         for epoch in tqdm(range(1, args.epochs + 1), desc="CIF轮次", unit="epoch"):
@@ -448,6 +451,8 @@ def main():
                    "mcp_loss": mcp_total / max(1, batches), "val_score": score}
             for view in VIEWS:
                 row.update({f"{view}_{key}": value for key, value in view_metrics[view].items()})
+            for view, changes in relative_degradation(view_metrics).items():
+                row.update({f"{view}_{key}": value for key, value in changes.items()})
             writer.writerow(row)
             file.flush()
             tqdm.write(f"CIF epoch={epoch:03d} loss={row['train_loss']:.4f} "
@@ -460,6 +465,7 @@ def main():
                 torch.save({"model": model.state_dict(), "epoch": epoch, "seed": args.seed,
                             "model_config": model_config, "val_views": view_metrics,
                             "val_score": score, "cap_epoch": cap_epoch,
+                            "selection_views": list(MAIN_VIEWS),
                             "evaluation_protocol": args.evaluation_protocol,
                             "evaluation_seed": evaluation_seed(args),
                             "cap_val_score": cap_best}, args.output_dir / "best.pt")
@@ -476,6 +482,7 @@ def main():
                 "device_used": str(device), "torch_version": torch.__version__,
                 "cuda_version": torch.version.cuda, "cap_best_epoch": cap_epoch,
                 "best_epoch": best_epoch, "elapsed_seconds": round(time.time() - started, 2),
+                "selection_views": list(MAIN_VIEWS),
                 "cap_trainable_parameters": cap_trainable_names,
                 "fusion_trainable_parameters": fusion_trainable_names})
     (args.output_dir / "run.json").write_text(json.dumps(run, indent=2), encoding="utf-8")

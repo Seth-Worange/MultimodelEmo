@@ -1,0 +1,45 @@
+protocol:
+  name: sample_v2
+  seed: 2026
+  neutral_zero: false
+candidates:
+  - name: q2_fuse_lowaux_s2026
+    family: FUSE
+    checkpoint: outputs/runs/q2_fuse_lowaux_s2026/best.pt
+    validation: outputs/runs/q2_fuse_lowaux_s2026/validation_metrics.json
+  - name: q2_fuse_lowaux_s2027
+    family: FUSE
+    checkpoint: outputs/runs/q2_fuse_lowaux_s2027/best.pt
+    validation: outputs/diagnostics/q2_selection_three_view_20260926/valid_q2_fuse_lowaux_s2027.json
+  - name: gate_norm_s2026
+    family: Gate
+    checkpoint: outputs/runs/gate_norm_s2026/best.pt
+    validation: outputs/runs/gate_norm_s2026/validation_metrics.json
+  - name: gate_norm_s2027
+    family: Gate
+    checkpoint: outputs/runs/gate_norm_s2027/best.pt
+    validation: outputs/runs/gate_norm_s2027/validation_metrics.json
+  - name: gate_lora_s2026
+    family: Gate-LoRA
+    checkpoint: outputs/runs/gate_lora_s2026/best.pt
+    validation: outputs/runs/gate_lora_s2026/validation_metrics.json
+  - name: gate_lora_s2027
+    family: Gate-LoRA
+    checkpoint: outputs/runs/gate_lora_s2027/best.pt
+    validation: outputs/runs/gate_lora_s2027/validation_metrics.json
+  - name: fuse_s2026
+    family: FUSE
+    checkpoint: outputs/runs/fuse_s2026/best.pt
+    validation: outputs/diagnostics/q2_selection_three_view_20260926/valid_fuse_s2026.json
+  - name: cica_softca_bigru_s20260924
+    family: CICA-BiGRU
+    checkpoint: outputs/runs/cica_softca_bigru_s20260924/best.pt
+    validation: outputs/diagnostics/q2_selection_three_view_20260926/valid_cica_softca_bigru_s20260924.json
+  - name: cica_softca_transformer_s20260924
+    family: CICA-Transformer
+    checkpoint: outputs/runs/cica_softca_transformer_s20260924/best.pt
+    validation: outputs/diagnostics/q2_selection_three_view_20260926/valid_cica_softca_transformer_s20260924.json
+  - name: b0_fuse_s2026
+    family: FUSE-B0
+    checkpoint: outputs/q2_fuse_missing/Final/s2026/best.pt
+    validation: outputs/diagnostics/q2_selection_three_view_20260926/valid_b0_fuse_s2026.json

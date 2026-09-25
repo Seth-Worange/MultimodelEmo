@@ -10,6 +10,7 @@ import torch
 
 from utils.data import load_main
 from utils.config import parse_config_args
+from utils.selection import MAIN_VIEWS, relative_degradation, selection_score, view_score
 from scripts.infer import load_model, checkpoint_metadata
 from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION,
                         load_text_encoder, load_text_tokenizer)
@@ -84,7 +85,14 @@ def main() -> None:
                            "batch_size": args.batch_size, "drop_modalities": list(drop),
                            "neutral_zero": args.neutral_zero,
                            "config": str(args.config.resolve()) if args.config else None},
-              "checkpoints": checkpoint_metadata(args.checkpoint), **view_metrics}
+              "checkpoints": checkpoint_metadata(args.checkpoint), **view_metrics,
+              "relative_degradation": relative_degradation(view_metrics)}
+    if args.split == "valid":
+        result["selection"] = {
+            "views": list(MAIN_VIEWS),
+            "view_scores": {view: view_score(view_metrics[view]) for view in MAIN_VIEWS},
+            "score": selection_score(view_metrics),
+        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
