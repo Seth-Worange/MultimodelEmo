@@ -29,6 +29,21 @@ class Q1Config:
     fmin_hz: float = 50.0
     fmax_hz: float = 500.0
     visual_fps: float = 10.0
+    visual_probe_fps: float = 5.0
+    # Existing fused archives remain MediaPipe-native; the separate selector's
+    # candidate default is OpenFace68 and does not relabel historical outputs.
+    visual_backend: str = "mediapipe478"
+    final_visual_backend_candidate: str = "openface68"
+    visual_feature_schema: str = "mediapipe478_xyz52_blendshape"
+    crop_margin_s: float = 0.30
+    extra_speech_tolerance_s: float = 0.15
+    extra_speech_min_duration_s: float = 0.20
+    asr_mfa_high_max_disagreement_s: float = 0.10
+    asr_mfa_medium_max_disagreement_s: float = 0.20
+    visual_qa_min_face_rate: float = 0.20
+    visual_qa_min_continuous_s: float = 0.40
+    visual_qa_min_face_area_ratio: float = 0.01
+    visual_qa_static_mean_difference_max: float = 0.006
     text_model: str = "google-bert/bert-base-uncased"
     text_pooling: str = "mean"
     text_window_overlap_words: int = 32
@@ -47,6 +62,7 @@ class Q1Config:
     min_face_presence_confidence: float = 0.5
     min_tracking_confidence: float = 0.5
     nearest_visual_max_distance_s: float | None = None
+    # Legacy 38-point schema for q1_v2.run; not an OpenFace feature.
     selected_landmarks: tuple[int, ...] = (
         0, 1, 4, 10, 13, 14, 17, 33, 46, 52, 55, 61, 63, 65, 66, 70,
         78, 105, 107, 133, 145, 152, 159, 263, 276, 282, 285, 291,
@@ -66,6 +82,11 @@ class Q1Config:
     @property
     def f0_window_samples(self) -> int:
         return int(round(self.sample_rate * self.f0_window_ms / 1000.0))
+
+    @property
+    def mediapipe_native_landmark_indices(self) -> tuple[int, ...]:
+        """One authoritative native MediaPipe topology for Round-4/5 extraction."""
+        return tuple(range(478))
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)

@@ -17,6 +17,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from .alignment import normalize_word
+from .config import Q1Config
 from .data_loader import split_original_words
 from .io_utils import write_csv, write_json
 from .media import MediaResult
@@ -49,9 +50,11 @@ class QAConfig:
     match_precision_min: float = 0.75
     match_edit_similarity_min: float = 0.70
     min_exact_tokens: int = 3
-    crop_margin_s: float = 0.30
+    crop_margin_s: float = Q1Config().crop_margin_s
     visual_probe_fps: float = 2.0
     static_mean_absolute_difference_max: float = 0.006
+    extra_speech_tolerance_s: float = Q1Config().extra_speech_tolerance_s
+    extra_speech_min_duration_s: float = Q1Config().extra_speech_min_duration_s
 
 
 def _tokens(text: str) -> list[str]:
@@ -217,6 +220,66 @@ def decide_correspondence(
     if match["token_recall"] >= 0.35:
         return "PARTIAL_MATCH", "REVIEW_REQUIRED", "partial_or_ambiguous_local_asr_match", True
     return "TEXT_AUDIO_MISMATCH", "INVALID_CORRESPONDENCE", "low_local_token_recall", True
+
+
+def vad_extra_speech(
+    vad_regions: Sequence[dict[str, float]], *,
+    matched_start_s: float | None, matched_end_s: float | None,
+    audio_start_s: float, audio_end_s: float,
+    tolerance_s: float, min_duration_s: float,
+    asr_unmatched_before: bool | None = None,
+    asr_unmatched_after: bool | None = None,
+) -> dict[str, Any]:
+    """VAD-primary cumulative speech outside the matched interval.
+
+    ASR unmatched tokens are supplementary; missing ASR words cannot suppress
+    a VAD-positive decision. Without a matched interval, direction is unknown.
+    """
+    if tolerance_s < 0 or min_duration_s <= 0:
+        raise ValueError("extra-speech tolerance must be nonnegative and duration positive")
+    if matched_start_s is None or matched_end_s is None:
+        return {
+            "extra_speech_before": None, "extra_speech_after": None,
+            "extra_speech_before_duration_s": None,
+            "extra_speech_after_duration_s": None,
+            "extra_speech_before_vad_regions": [], "extra_speech_after_vad_regions": [],
+            "extra_speech_asr_unmatched_before": asr_unmatched_before,
+            "extra_speech_asr_unmatched_after": asr_unmatched_after,
+            "extra_speech_rule": "unavailable_without_matched_audio_span",
+        }
+    if not audio_start_s <= matched_start_s < matched_end_s <= audio_end_s + .05:
+        raise ValueError("Matched interval outside the decoded audio time range")
+
+    def clipped_regions(left: float, right: float) -> tuple[list[dict[str, float]], float]:
+        spans: list[tuple[float, float]] = []
+        for region in vad_regions:
+            start = max(left, float(region["start_s"]))
+            end = min(right, float(region["end_s"]))
+            if end > start:
+                spans.append((start, end))
+        spans.sort()
+        merged: list[list[float]] = []
+        for start, end in spans:
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        return ([{"start_s": start, "end_s": end} for start, end in merged],
+                sum(end - start for start, end in merged))
+
+    before, before_duration = clipped_regions(audio_start_s, matched_start_s - tolerance_s)
+    after, after_duration = clipped_regions(matched_end_s + tolerance_s, audio_end_s)
+    return {
+        "extra_speech_before": before_duration >= min_duration_s,
+        "extra_speech_after": after_duration >= min_duration_s,
+        "extra_speech_before_duration_s": before_duration,
+        "extra_speech_after_duration_s": after_duration,
+        "extra_speech_before_vad_regions": before,
+        "extra_speech_after_vad_regions": after,
+        "extra_speech_asr_unmatched_before": asr_unmatched_before,
+        "extra_speech_asr_unmatched_after": asr_unmatched_after,
+        "extra_speech_rule": "merged_VAD_overlap_outside_match_cumulative_duration",
+    }
 
 
 def inspect_audio_correspondence(

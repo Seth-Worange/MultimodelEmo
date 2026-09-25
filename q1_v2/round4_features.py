@@ -232,7 +232,7 @@ def process_one(
             crop_path = sample_dir / "audio_mfa_local_crop.wav"
             crop = crop_for_local_mfa(
                 media, float(qa["matched_audio_start_s"]), float(qa["matched_audio_end_s"]),
-                margin_s=0.30, output_path=crop_path,
+                margin_s=config.crop_margin_s, output_path=crop_path,
             )
             write_json(sample_dir / "mfa_crop_metadata.json", crop)
             try:
@@ -319,7 +319,7 @@ def process_one(
         visual = extract_visual_features(
             record.video_path, media.video_frames, alignment,
             face_model_path=face_model,
-            selected_landmarks=tuple(range(478)),  # Native MediaPipe topology, NOT OpenFace/iBUG 68.
+            selected_landmarks=config.mediapipe_native_landmark_indices,
             sampling_fps=config.visual_fps,
             max_faces=config.max_faces,
             min_face_detection_confidence=config.min_face_detection_confidence,
