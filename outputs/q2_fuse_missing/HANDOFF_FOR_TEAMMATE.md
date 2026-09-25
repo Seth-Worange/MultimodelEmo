@@ -1,76 +1,57 @@
-# Q2 Autonomous R&D handoff
+# Q2 最终实验交接记录
 
-## Current source state
+## 当前状态
 
-- Branch: `shuke/q2-fuse-missing`
-- Latest source commit before this handoff: `f661317`
-- Earlier integration commit: `bffa816`
-- No push, merge, or PR was performed.
-- Data root: `D:\\PycharmProjects\\26MATH\\code\\data`
-- Python: `D:\\condaData\\envs_dirs\\my_env01\\python.exe`
-- Current PyTorch is CPU-only and is the intended execution environment.
+- 分支：`shuke/q2-fuse-missing`
+- 代码基线：`08d63ba docs(q2): add experiment handoff and fixed robustness suite`
+- 本次完成：CUDA 下以冻结 B0 FUSE 配置重训 seed 2026、2027、2028；对三个最终 checkpoint 和两个历史 FUSE checkpoint 运行 50-case validation robustness；生成三 seed 汇总、诊断图与最终报告。
+- 环境：`C:\Anaconda3\envs\pytorch\python.exe`，PyTorch 2.8.0+cu126，RTX 4060 Laptop GPU。未使用 Pytorch39。
+- 未执行 push、merge、PR。
 
-## Completed work
+## 冻结方案和结果
 
-1. Selective FUSE integration from the teammate branch.
-2. Missing-aware HMF/MRC/MDF path with cross reconstruction.
-3. Train-only normalization implementation and checkpoint persistence.
-4. B0/B1/B2 discovery with seed 2026.
-5. Full 50-case validation robustness scans for B0/B1/B2.
-6. LR screening for `3e-4`, `5e-4`, `1e-3`, `2e-3`.
-7. Formal final seed 2027 training completed.
-8. Data, augmentation, network, FUSE demos and compile checks passed.
+最终方案为 **B0 FUSE**，学习率 `1e-3`，输入归一化关闭，结构化缺失训练关闭。按 validation selection score 保存最佳 checkpoint；测试集未用于模型选择或本次新分析。
 
-## Measured discovery results
+| seed | best epoch | selection score | clean Macro-F1 | clean MAE | clean Neutral F1 |
+|---:|---:|---:|---:|---:|---:|
+| 2026 | 2 | 0.2983 | 0.6085 | 0.5779 | 0.5076 |
+| 2027 | 4 | 0.3053 | 0.6005 | 0.5753 | 0.4360 |
+| 2028 | 5 | 0.3141 | 0.5849 | 0.5869 | 0.4795 |
+| mean ± SD | — | — | 0.5980 ± 0.0120 | 0.5800 ± 0.0061 | 0.4744 ± 0.0361 |
 
-| candidate | best epoch | selection score | clean macro-F1 | clean MAE | fixed R1-R5 Robust-F1 | Robust-MAE |
-|---|---:|---:|---:|---:|---:|---:|
-| B0 | 2 | 0.2941 | 0.6303 | 0.6112 | 0.6032 | 0.6155 |
-| B1 | 2 | 0.3124 | 0.6052 | 0.6465 | 0.5690 | 0.6731 |
-| B2 | 3 | 0.3109 | 0.6035 | 0.6362 | 0.5714 | 0.6549 |
+固定 R1–R5 鲁棒性平均 Macro-F1 为 `0.5685 ± 0.0112`，MAE 为 `0.6094 ± 0.0106`。B1（归一化）与 B2（结构化缺失）是 discovery 阶段的负结果；候选对比见 `FINAL_REPORT.md`。
 
-LR screening selection scores:
+## 主要结果文件
 
-- `3e-4`: 0.2960
-- `5e-4`: 0.2954
-- `1e-3`: 0.2941 (selected)
-- `2e-3`: 0.3045
+- `FINAL_REPORT.md`：完整实验协议、指标、历史比较、Neutral F1 与回归幅度分析。
+- `final_summary.csv`、`final_multiseed_summary.csv`：逐 seed 与 mean/SD 汇总。
+- `paired_delta.csv`：与历史 FUSE 的同 seed 描述性配对差值（n=2）。
+- `neutral_f1_analysis.csv`、`regression_magnitude_shrinkage.csv`、`confusion_matrix.csv`：诊断明细。
+- `confusion_matrix_final.{png,pdf,svg,tiff}`、`regression_magnitude_shrinkage.{png,pdf,svg,tiff}`：图表导出。
+- `final_run_manifest.json`：checkpoint 哈希、设备与运行元数据。
+- `Final/s2026/`、`Final/s2027/`、`Final/s2028/`：三 seed checkpoint、训练指标和运行配置。
+- `Final/*_robustness.csv`：三个最终模型和两个历史模型各自的 50-case 验证结果。
 
-The selected final protocol is B0 FUSE, normalization off, structured missing off, LR `1e-3`.
-B1 and B2 are negative results and must remain in the final report.
+## 复现命令
 
-Formal seed 2027 is present at `outputs/q2_fuse_missing/Final/s2027/`:
-best epoch 3, selection score 0.3028, clean macro-F1 0.6156, clean MAE 0.6366.
-
-## Remaining execution
-
-Run seed 2028 with the frozen protocol:
+在 `MultimodelEmo` 工程目录运行：
 
 ```powershell
-& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.train --config config\q2_fuse_b0.yaml --device cpu --seed 2028 --lr 0.001 --output-dir outputs\q2_fuse_missing\Final\s2028
+$py = 'C:\Anaconda3\envs\pytorch\python.exe'
+& $py -m scripts.train --config config\q2_fuse_b0.yaml --device cuda --seed 2026 --lr 0.001 --output-dir outputs\q2_fuse_missing\Final\s2026
+& $py -m scripts.train --config config\q2_fuse_b0.yaml --device cuda --seed 2027 --lr 0.001 --output-dir outputs\q2_fuse_missing\Final\s2027
+& $py -m scripts.train --config config\q2_fuse_b0.yaml --device cuda --seed 2028 --lr 0.001 --output-dir outputs\q2_fuse_missing\Final\s2028
 ```
 
-Then run the full robustness suite for the selected final checkpoints:
+训练后对每个 seed 执行 `scripts.robustness`，然后运行：
 
 ```powershell
-& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.robustness --checkpoint outputs\q2_fuse_missing\B0\s2026\best.pt --data-root ..\data --device cpu --batch-size 128 --output outputs\q2_fuse_missing\Final\s2026_robustness.csv
-& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.robustness --checkpoint outputs\q2_fuse_missing\Final\s2027\best.pt --data-root ..\data --device cpu --batch-size 128 --output outputs\q2_fuse_missing\Final\s2027_robustness.csv
-& 'D:\condaData\envs_dirs\my_env01\python.exe' -m scripts.robustness --checkpoint outputs\q2_fuse_missing\Final\s2028\best.pt --data-root ..\data --device cpu --batch-size 128 --output outputs\q2_fuse_missing\Final\s2028_robustness.csv
+$env:NATURE_FIGURE_AUDIT_SCRIPTS = 'C:\Users\Orange\.codex\skills\nature-figure\scripts'
+& $py -m scripts.finalize_q2_fuse --data-root data --device cuda
 ```
 
-Use validation only for all selection and robustness calculations. Do not run test evaluation
-until the final model is frozen. Compute mean and standard deviation across seeds 2026/2027/2028
-for clean Accuracy, Macro-F1, MAE, Pearson, Robust-F1, Robust-MAE, and the fixed R1-R5 rows.
+## 解读边界
 
-## Required final artifacts
+历史 FUSE checkpoint 使用 corruption probability `0.8`、missing mode `auto`；最终 B0 使用 `0.0`、`whole`。历史比较使用一致的验证样本和缺失场景，但训练方案不同，因此配对差值只作描述性方案对比，不能解释为单一改动的因果效应。三 seed 标准差是 seed 间离散程度，不是置信区间。
 
-- `outputs/q2_fuse_missing/final_summary.csv`
-- `outputs/q2_fuse_missing/final_multiseed_summary.csv`
-- `outputs/q2_fuse_missing/FINAL_REPORT.md`
-- confusion matrices and neutral/strong-sentiment regression diagnostics
-- final tests, compile check, `git diff --check`
-- one local source-freeze commit
-
-The final report must state the B1/B2 negative results, the LR screening table, seed mean ± std,
-comparison against the historical FUSE reference, and the final limitations. It must state
-`push: NO`, `merge: NO`, `PR: NO`.
+最终执行状态：**push: NO；merge: NO；PR: NO。**

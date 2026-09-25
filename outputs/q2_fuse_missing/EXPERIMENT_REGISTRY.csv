@@ -2,3 +2,6 @@ candidate,seed,architecture,normalize_inputs,corruption_probability,corruption_m
 B0,2026,fuse,false,0.0,whole,outputs/q2_fuse_missing/B0/s2026,one_epoch_cpu_smoke
 B1,2026,fuse,true,0.0,whole,outputs/q2_fuse_missing/B1/s2026,one_epoch_cpu_smoke_plus_eval
 B2,2026,fuse,true,0.8,auto,outputs/q2_fuse_missing/B2/s2026,one_epoch_cpu_smoke
+B0,2026,fuse,false,0.0,whole,outputs/q2_fuse_missing/Final/s2026,final_cuda_completed_best_epoch_2
+B0,2027,fuse,false,0.0,whole,outputs/q2_fuse_missing/Final/s2027,final_cuda_completed_best_epoch_4
+B0,2028,fuse,false,0.0,whole,outputs/q2_fuse_missing/Final/s2028,final_cuda_completed_best_epoch_5
