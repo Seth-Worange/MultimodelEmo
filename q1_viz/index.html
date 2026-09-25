@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>问题1 · 多模态数据处理与时序特征构建</title>
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body data-palette="#2a78d6,#eb6834,#1baf7a">
+  <div class="page">
+    <header class="hero">
+      <p class="eyebrow">2026 中国研究生数学建模竞赛 · E 题 · 问题1</p>
+      <h1>复杂场景下多模态情感识别<br />数据处理与时序特征构建</h1>
+      <p class="subtitle">CMU-MOSEI 100 条原始视频 · 质量诊断 · 文本-音频一致性 · ASR 局部定位 + MFA 精对齐 · OpenFace68 视觉特征</p>
+      <div class="chip-row" id="meta-chips"></div>
+    </header>
+
+    <section class="band" id="pipeline-section">
+      <h2>处理流程</h2>
+      <div class="pipeline" id="pipeline"></div>
+    </section>
+
+    <main>
+      <section class="band" id="quality-section">
+        <h2>模块 1 · 数据集质量总览</h2>
+        <p class="lede">100 条样本人工质量审核与自动 QA 分类分布。人工标注仅用于事后评估，不参与路由、训练与阈值调整。</p>
+        <div class="tile-row" id="quality-tiles"></div>
+        <figure class="figure">
+          <figcaption><span class="fig-no">图 1</span>人工审核类别分布（100 条）</figcaption>
+          <div id="chart-quality"></div>
+        </figure>
+      </section>
+
+      <section class="band" id="qa-section">
+        <h2>模块 2 · 文本-音频一致性（Correspondence QA）</h2>
+        <p class="lede">保守优先路由：仅 <code>HIGH_CONFIDENCE_MATCH</code> 允许进入局部 ASR + MFA 对齐。在 100 条人工核验上评估安全路由。</p>
+        <div class="tile-row" id="qa-tiles"></div>
+        <div class="two-col">
+          <figure class="figure">
+            <figcaption><span class="fig-no">图 2</span>安全路由决策（自动放行 vs 人工判定）</figcaption>
+            <div id="chart-routing"></div>
+          </figure>
+          <figure class="figure">
+            <figcaption><span class="fig-no">图 3</span>人工 × 自动分类混淆矩阵</figcaption>
+            <div id="chart-confusion"></div>
+          </figure>
+        </div>
+        <details class="table-view">
+          <summary>表 1 · 额外讲话（extra speech）规则评估（同口径 71 条）</summary>
+          <div id="table-extra-speech"></div>
+        </details>
+      </section>
+
+      <section class="band" id="alignment-section">
+        <h2>模块 3 · 时序对齐可视化</h2>
+        <p class="lede">典型样本 <code>-3g5yACwYnA__13</code>：MFA 词级边界、人工逐词参考边界、音频包络与视频帧在同一时间轴上。</p>
+        <figure class="figure">
+          <figcaption><span class="fig-no">图 4</span>词级时间对齐（MFA 输出 vs 人工逐词边界）</figcaption>
+          <div id="chart-timeline"></div>
+        </figure>
+        <div class="thumbs-row" id="timeline-thumbs"></div>
+        <details class="table-view" open>
+          <summary>表 2 · 人工逐词边界校验（check5.xlsx，5 条样本）</summary>
+          <div id="table-boundary"></div>
+        </details>
+        <details class="table-view">
+          <summary>表 3 · 对齐置信度（MFA–ASR 分歧，68 词）</summary>
+          <div id="table-confidence"></div>
+        </details>
+      </section>
+
+      <section class="band" id="visual-section">
+        <h2>模块 4 · OpenFace68 视觉特征</h2>
+        <p class="lede">真实 OpenFace 2.2.0 后端：68 点几何（眼中心平移 + 眼距尺度归一化）、35 维 Action Units、6 维头姿、8 维视线，分块保留。</p>
+        <div class="two-col">
+          <figure class="figure">
+            <figcaption><span class="fig-no">图 5</span>OpenFace 68 点拓扑（示意）与特征块</figcaption>
+            <div id="chart-face"></div>
+          </figure>
+          <figure class="figure">
+            <figcaption><span class="fig-no">图 6</span>视觉后端有效帧对比（MediaPipe478 基线 vs OpenFace68）</figcaption>
+            <div id="chart-backend"></div>
+          </figure>
+        </div>
+      </section>
+
+      <section class="band" id="explorer-section">
+        <h2>模块 5 · 样本浏览器</h2>
+        <p class="lede">逐样本质量标志、对齐区间与特征维度摘要。数据来自 <code>outputs/q1_v2_round5_1</code> 冻结特征包。</p>
+        <div class="explorer-controls">
+          <label for="sample-select">样本</label>
+          <select id="sample-select"></select>
+        </div>
+        <div id="explorer-body"></div>
+      </section>
+    </main>
+
+    <footer class="band">
+      <h2>数据来源</h2>
+      <p class="lede">本页全部数值由 <code>tools/build_frontend_data.py</code> 从实验产物生成，未硬编码实验结果。</p>
+      <ul class="sources" id="sources"></ul>
+    </footer>
+    <div id="tooltip" class="tooltip" hidden></div>
+    <noscript><p class="lede">需要启用 JavaScript 才能浏览本页。</p></noscript>
+  </div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
