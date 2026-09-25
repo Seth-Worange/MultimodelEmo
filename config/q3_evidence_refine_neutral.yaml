@@ -1,18 +1,13 @@
-align:
-  data_root: data
-  device: cuda
-  output: outputs/runs/main/q3_alignment.json
-
-infer:
-  part: q3
+# 对中性强度归零的最终预测版本重新筛选时间证据。
+refine:
   checkpoint:
     - outputs/runs/fuse_s2026/best.pt
     - outputs/runs/fuse_s2027/best.pt
     - outputs/runs/q2_fuse_lowaux_s2026/best.pt
     - outputs/runs/q2_fuse_lowaux_s2027/best.pt
   neutral_zero: true
-  device: cuda
+  evidence_csv: outputs/predictions_q3_mixed_neutral/q3_evidence_windows.csv
   data_root: data
   output_dir: outputs/predictions_q3_mixed_neutral
-  alignment_file: outputs/runs/main/q3_alignment.json
-  max_samples: 0
+  top_k: 10
+  device: cuda

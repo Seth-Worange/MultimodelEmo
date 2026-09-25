@@ -38,6 +38,18 @@
 
 ## 问题2：训练和鲁棒性评估
 
+当前推荐推理与验证配置是 `config\q2_best.yaml`，使用四个已训练FUSE检查点；该配置只负责评估、鲁棒性分析和专项推理，单模型训练配置分别保留在实验记录中。附件2 valid 四视图均优于旧门控双模型。
+
+附件3只提供 `text_bert`，没有 `raw_text`；需要对附件3推理的BERT微调方案应在训练、验证和专项测试统一使用 `bert_input_source: text_bert`。这里的 `text_bert` 是token id、attention mask、token type三通道，经可训练BERT得到768维表征。`q2_fuse_bert_finetune.yaml` 的完整转写实验只能作为附件2研究对照，不可直接用其检查点处理附件3。数据、损失与错误切片审计见 [experiment.md](experiment.md)。
+
+```powershell
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.evaluate --config config\q2_best.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.robustness --config config\q2_best.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q2_best.yaml
+```
+
+以下为历史架构的训练及对照命令。`q2.yaml` 的训练默认写入 `availability_retrain_s2026`，避免覆盖已选检查点；同一文件的评估节仍读取原历史检查点。若评估新训练权重，需用 `--checkpoint` 指定新路径：
+
 ```powershell
 # 门控基线架构
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.train --config config\q2.yaml
@@ -142,7 +154,7 @@
 附件3预测：
 
 ```powershell
-& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q2.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q2_best.yaml
 # CICA 方案训练完成后，可通过对应配置预测并输出置信度/不确定性/融合权重
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q2_cica.yaml
 ```
@@ -152,11 +164,12 @@
 ```powershell
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.align_q3 --config config\q3.yaml
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q3.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.refine_q3_evidence --config config\q3_evidence_refine_neutral.yaml
 ```
 
 可用 `--max-samples 1` 先验证接口。
 
-问题2结果位于 `outputs\predictions_availability`，问题3结果位于 `outputs\predictions_availability_q3`。问题3使用三模态8个子集（含空模态基线）计算 Shapley 贡献，并逐模态遮蔽连续5位置窗口，输出预测分数变化。附件4特征文件本身不含词时间戳；`align_q3.py` 逐位置核对重建的BERT词元与附件4中的词元，不匹配率不足时标记 `review_required`，不会输出未经核验的时间。人工核查后再用于答卷。`config\q3.yaml` 的 `alignment_file` 指向已生成的 `outputs\runs\main\q3_alignment.json`（20条全部 `mapped`、`token_match_fraction=1.0`）；若该文件缺失，`infer.py` 会直接报错而不是静默退化成位置级输出。
+问题2当前推荐结果位于 `outputs\predictions_q2_best`（旧门控结果仍在 `outputs\predictions_availability`），问题3默认结果位于 `outputs\predictions_q3_mixed_neutral`，旧门控双模型配置保留为 `config\q3_availability_legacy.yaml`。问题3使用三模态8个子集（含空模态基线）计算 Shapley 贡献，并逐模态遮蔽连续5位置窗口，输出预测分数变化；最终证据窗口同时检查删除和单窗口保留分数。附件4特征文件本身不含词时间戳；`align_q3.py` 逐位置核对重建的BERT词元与附件4中的词元，不匹配率不足时标记 `review_required`，不会输出未经核验的时间。人工核查后再用于答卷。`config\q3.yaml` 的 `alignment_file` 指向已生成的 `outputs\runs\main\q3_alignment.json`（20条全部 `mapped`、`token_match_fraction=1.0`）；若该文件缺失，`infer.py` 会直接报错而不是静默退化成位置级输出。
 
 新增脚本 `scripts\figures_q1.py` 生成问题1的典型样本对齐图与覆盖率汇总表，见下节。
 
@@ -176,7 +189,7 @@
 
 验证集clean MAE由0.5729降至0.5628，分类指标不变，Pearson由0.6737略降至0.6704。该配置只增加显式输出规则，不重训。结果与逐样本预测写入 `outputs/diagnostics/bottleneck_audit_20260924/`；不覆盖历史评估。
 
-新Q3输出的 `evidence_scope` 和 `aligned_word_coverage` 说明模型可解释的词覆盖范围。`token_match_fraction=1` 不能代表完整视频覆盖或声学对齐准确，已有映射在下一次推理时也会生成覆盖字段。
+新Q3输出的 `evidence_scope` 和 `aligned_word_coverage` 说明模型可解释的词覆盖范围。`token_match_fraction=1` 不能代表完整视频覆盖或声学对齐准确，已有映射在下一次推理时也会生成覆盖字段。当前默认方案在附件2验证集的clean Acc/F1/MAE为0.6566/0.6386/0.5571；附件4无标签，不能据此写出附件4的准确率。
 
 ### P1 音视频标准化与GRU打包对照
 
@@ -200,4 +213,4 @@
 
 附件4第13条的对齐版视觉特征为全零，推理时会通过掩码将视觉标为缺失，只用文本和音频，输出的 `missing_modalities` 会注明 `vision`；视觉 Shapley 贡献为0。未对齐版虽有17个非零视觉位置，但它与50词位对齐特征并非同一表示，不能只替换第13条。若切换未对齐数据，须按答疑要求对训练、验证和专项测试统一应用同一套对齐流程并重新训练。
 
-提交时排除 `cache` 中的模型下载文件；运行 `Get-ChildItem outputs\features_q1_face_pose,outputs\runs\availability_s2026,outputs\runs\availability_s2027,outputs\predictions_availability,outputs\predictions_availability_q3 -Recurse | Measure-Object -Property Length -Sum` 并确认附件总大小满足题目50 MB上限。
+提交时排除 `cache` 中的模型下载文件；运行 `Get-ChildItem outputs\features_q1_face_pose,outputs\runs\fuse_s2026,outputs\runs\fuse_s2027,outputs\runs\q2_fuse_lowaux_s2026,outputs\runs\q2_fuse_lowaux_s2027,outputs\predictions_q2_best,outputs\predictions_q3_mixed_neutral -Recurse | Measure-Object -Property Length -Sum` 并确认附件总大小满足题目50 MB上限。

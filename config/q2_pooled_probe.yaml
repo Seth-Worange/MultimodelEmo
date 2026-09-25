@@ -1,0 +1,6 @@
+# 诊断探针，不替代三模态模型或专项验证。
+probe:
+  data_root: data
+  output_dir: outputs/diagnostics/goal67/pooled_probe
+  classification_c: [1.0, 10.0]
+  regression_c: 10.0

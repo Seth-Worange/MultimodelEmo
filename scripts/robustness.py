@@ -87,6 +87,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent.parent / "outputs" / "runs" / "main" / "robustness.csv")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--neutral-zero", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--rates", type=float, nargs="+", default=list(DEFAULT_RATES),
                         help="缺失率/缺失长度比例扫描点")
     parser.add_argument("--locations", nargs="+", default=list(DEFAULT_LOCATIONS),
@@ -102,7 +103,7 @@ def main() -> None:
                           else "cpu" if args.device == "auto" else args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
-    model = load_model(args.checkpoint, device)
+    model = load_model(args.checkpoint, device, neutral_zero=args.neutral_zero)
     bert_finetune = bool(getattr(model, "bert_finetune", False))
     bert_model_name = getattr(model, "bert_model_name", DEFAULT_BERT)
     bert_revision = getattr(model, "bert_model_revision", DEFAULT_BERT_REVISION)

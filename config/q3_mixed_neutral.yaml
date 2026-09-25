@@ -1,8 +1,4 @@
-align:
-  data_root: data
-  device: cuda
-  output: outputs/runs/main/q3_alignment.json
-
+# 四模型集成；预测中性时强度归零，附件4只推理不选型。
 infer:
   part: q3
   checkpoint:

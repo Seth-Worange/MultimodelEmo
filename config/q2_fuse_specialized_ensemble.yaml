@@ -1,0 +1,16 @@
+# 固定等权五模型对照，不根据验证集逐样本调权。
+evaluate:
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2026/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2027/best.pt
+    - outputs/runs/q2_fuse_text_polarity_s2026/best.pt
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  seed: 2026
+  evaluation_protocol: sample_v2
+  neutral_zero: true
+  output: outputs/diagnostics/goal67/q2_specialized_ensemble_valid.json

@@ -9,7 +9,7 @@ train:
   patience: 8
   seed: 2026
   distill_weight: 0.1
-  output_dir: outputs/runs/availability_s2026
+  output_dir: outputs/runs/availability_retrain_s2026
   corruption_probability: 0.8
   # 缺失形态覆盖：整段丢弃 / 零散短游程（附件3形态）/ 多尺度连续区间（含部分重叠）。
   # interval_modalities 限定为声画：附件3 实测文本从不缺失，实测该设置优于允许文本缺失。
@@ -26,7 +26,7 @@ train:
   regression_mode: soft
   class_weight_power: 0.5
   # 三种模态的序列编码器，可选 bigru / transformer。
-  encoder_type: transformer
+  encoder_type: bigru
   transformer_layers: 1
   transformer_heads: 4
 

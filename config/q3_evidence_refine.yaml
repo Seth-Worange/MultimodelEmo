@@ -1,0 +1,12 @@
+# 删除与保留均支持原预测时才将窗口标作双向有效证据。
+refine:
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2026/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2027/best.pt
+  evidence_csv: outputs/predictions_q3_mixed/q3_evidence_windows.csv
+  data_root: data
+  output_dir: outputs/predictions_q3_mixed
+  top_k: 10
+  device: cuda

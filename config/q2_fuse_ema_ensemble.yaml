@@ -1,0 +1,16 @@
+# EMA平滑低辅助模型加入现有四模型的固定等权对照。
+evaluate:
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2026/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2027/best.pt
+    - outputs/runs/q2_fuse_lowaux_ema_s2026/best.pt
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  seed: 2026
+  evaluation_protocol: sample_v2
+  neutral_zero: true
+  output: outputs/diagnostics/goal67/q2_ema_ensemble_valid.json

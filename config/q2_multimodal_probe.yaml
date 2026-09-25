@@ -1,0 +1,8 @@
+# 使用train拟合PCA、标准化、SVC、SVR；valid只评估。
+probe:
+  data_root: data
+  output_dir: outputs/diagnostics/goal67/multimodal_probe
+  pca_components: 128
+  av_weights: [0.5, 1.0]
+  classification_c: [1.0, 10.0]
+  regression_c: 10.0

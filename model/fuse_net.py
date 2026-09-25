@@ -48,7 +48,9 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
                  bert_model_revision: str = "86b5e0934494bd15c9632b12f734a8a67f723594",
                  bert_freeze_bottom_layers: int = 8,
                  bert_gradient_checkpointing: bool = True,
-                 bert_max_length: int = 512, bert_input_source: str = "raw_text"):
+                 bert_max_length: int = 512, bert_input_source: str = "raw_text",
+                 text_residual: bool = False, hierarchical_head: bool = False,
+                 text_polarity_head: bool = False):
         super().__init__()
         if text_mode not in {"tokens", "bert"}:
             raise ValueError(f"Unknown text mode: {text_mode}")
@@ -67,6 +69,11 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
         self.bert_freeze_bottom_layers = int(bert_freeze_bottom_layers)
         self.bert_max_length = int(bert_max_length)
         self.bert_input_source = bert_input_source
+        self.text_residual = bool(text_residual)
+        self.hierarchical_head = bool(hierarchical_head)
+        self.text_polarity_head = bool(text_polarity_head)
+        if self.text_polarity_head and not self.hierarchical_head:
+            raise ValueError("text_polarity_head requires hierarchical_head")
         if self.bert_finetune and text_mode != "bert":
             raise ValueError("bert_finetune requires text_mode='bert'")
         self.init_input_processing(normalize_inputs, pack_aligned_grus, AUDIO_DIM, VISION_DIM)
@@ -147,8 +154,15 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
         self.fusion_gru = nn.GRU(width, hidden_dim, batch_first=True, bidirectional=True)
         self.pool_score = nn.Linear(width, 1)
         self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(width, 3)
+        self.classifier = nn.Linear(width, 3) if not self.hierarchical_head else None
+        if self.hierarchical_head:
+            self.neutral_classifier = nn.Linear(width, 1)
+            self.polarity_classifier = nn.Linear(width, 1)
         self.regressor = nn.Linear(width, 1)
+        if self.text_residual:
+            self.text_residual_classifier = nn.Linear(width, 3)
+            nn.init.zeros_(self.text_residual_classifier.weight)
+            nn.init.zeros_(self.text_residual_classifier.bias)
 
     @staticmethod
     def _masked_softmax(scores: torch.Tensor, mask: torch.Tensor, dim: int) -> torch.Tensor:
@@ -286,7 +300,26 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
             tail = self.long_text_projection(tail_context)
             pooled = pooled + torch.tanh(self.long_text_scale) * tail * tail_available.unsqueeze(-1)
         pooled = self.dropout(pooled)
-        logits = self.classifier(pooled)
+        if self.hierarchical_head:
+            neutral = self.neutral_classifier(pooled).squeeze(-1)
+            polarity_input = pooled
+            if self.text_polarity_head:
+                text_evidence = masked_mean(encoded["text"], available["text"])
+                text_present = available["text"].any(dim=1, keepdim=True)
+                polarity_input = torch.where(text_present, self.dropout(text_evidence), pooled)
+            polarity = self.polarity_classifier(polarity_input).squeeze(-1)
+            # 层级概率：先区分中性，再判断非中性情感的极性。
+            logits = torch.stack((
+                F.logsigmoid(-neutral) + F.logsigmoid(-polarity),
+                F.logsigmoid(neutral),
+                F.logsigmoid(-neutral) + F.logsigmoid(polarity),
+            ), dim=-1)
+        else:
+            logits = self.classifier(pooled)
+        if self.text_residual:
+            text_pooled = masked_mean(encoded["text"], available["text"])
+            text_present = available["text"].any(dim=1, keepdim=True).to(logits.dtype)
+            logits = logits + self.text_residual_classifier(self.dropout(text_pooled)) * text_present
         raw_strength = self.regressor(pooled).squeeze(-1)
         if self.regression_mode == "signed":
             sentiment = 3.0 * torch.tanh(raw_strength)
@@ -314,6 +347,7 @@ class FactorizedAffectiveModel(nn.Module, AlignedInputProcessing):
             "logits": logits,
             "magnitude": magnitude,
             "sentiment": sentiment,
+            "pooled": pooled,
             "modality_weights": modality_share,
             "time_weights": time_weights,
             "encoded": encoded,

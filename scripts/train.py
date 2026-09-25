@@ -23,12 +23,18 @@ from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text, load_t
                         load_text_tokenizer, prepare_bert_inputs)
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel, build_fuse_regularization
+from model.complementary_net import ComplementaryAffectiveModel
 
-ARCHITECTURES = ("baseline", "fuse")
+ARCHITECTURES = ("baseline", "fuse", "complementary")
 
 
 def build_model(args) -> torch.nn.Module:
     """按配置构造情感模型；fuse 为 FUSE-Net 风格的三因子分解架构。"""
+    if args.architecture == "complementary":
+        return ComplementaryAffectiveModel(
+            hidden_dim=64, dropout=args.dropout, audio_dynamics=args.audio_dynamics,
+            regression_mode=args.regression_mode, normalize_inputs=args.normalize_inputs,
+            pack_aligned_grus=args.pack_aligned_grus, text_mode=args.text_mode)
     if args.architecture == "fuse":
         return FactorizedAffectiveModel(
             text_mode=args.text_mode, audio_dynamics=args.audio_dynamics,
@@ -40,7 +46,9 @@ def build_model(args) -> torch.nn.Module:
             bert_model_revision=args.bert_model_revision,
             bert_freeze_bottom_layers=args.bert_freeze_bottom_layers,
             bert_gradient_checkpointing=args.bert_gradient_checkpointing,
-            bert_max_length=args.bert_max_length, bert_input_source=args.bert_input_source)
+            bert_max_length=args.bert_max_length, bert_input_source=args.bert_input_source,
+            text_residual=args.text_residual, hierarchical_head=args.hierarchical_head,
+            text_polarity_head=args.text_polarity_head)
     return AffectiveModel(fusion=args.fusion, text_mode=args.text_mode,
                           audio_dynamics=args.audio_dynamics,
                           regression_mode=args.regression_mode, dropout=args.dropout,
@@ -70,7 +78,13 @@ def model_config(args) -> dict:
               "bert_gradient_checkpointing": args.bert_gradient_checkpointing,
               "bert_max_length": args.bert_max_length, "bert_input_source": args.bert_input_source}
     if args.architecture == "fuse":
-        return {**common, "tau": args.tau}
+        return {**common, "tau": args.tau, "text_residual": args.text_residual,
+                "hierarchical_head": args.hierarchical_head,
+                "text_polarity_head": args.text_polarity_head}
+    if args.architecture == "complementary":
+        return {key: common[key] for key in (
+            "text_mode", "audio_dynamics", "regression_mode", "dropout",
+            "normalize_inputs", "pack_aligned_grus")} | {"architecture": "complementary"}
     return {**common, "fusion": args.fusion}
 
 
@@ -150,11 +164,49 @@ def checkpoint_state_dict(model: torch.nn.Module, compact_bert: bool) -> dict[st
     return state
 
 
+def initialize_from_frozen_checkpoint(model: torch.nn.Module, path: Path,
+                                      expected_config: dict) -> dict:
+    """加载同结构的冻结BERT融合模型，仅让新BERT模块保留公开预训练权重。"""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    previous = checkpoint["model_config"]
+    current = {"embedding_dim": 96, "hidden_dim": 64, **expected_config}
+    allowed_changes = {"bert_finetune", "bert_freeze_bottom_layers",
+                       "bert_gradient_checkpointing", "bert_max_length", "bert_input_source"}
+    legacy_defaults = {"text_residual": False, "hierarchical_head": False,
+                       "text_polarity_head": False}
+    for key in current.keys() | previous.keys():
+        if key not in allowed_changes and current.get(key, legacy_defaults.get(key)) != previous.get(
+                key, legacy_defaults.get(key)):
+            raise ValueError(f"Warm-start checkpoint architecture mismatch: {key}")
+    if previous.get("bert_finetune", False) or not current["bert_finetune"]:
+        raise ValueError("Warm-start requires frozen-BERT source and trainable-BERT target")
+    if current["bert_input_source"] != "text_bert":
+        raise ValueError("Warm-start requires text_bert to match the cached alignment")
+    loaded = model.load_state_dict(checkpoint["model"], strict=False)
+    expected_missing = {name for name in model.state_dict()
+                        if name.startswith("bert_text_encoder.") or name.startswith("long_text_")}
+    if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
+        raise RuntimeError("Warm-start checkpoint state does not match the target model")
+    return {"path": str(path), "epoch": checkpoint.get("epoch")}
+
+
 def supervised_loss(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor],
-                    class_weights: torch.Tensor | None = None) -> torch.Tensor:
-    return F.cross_entropy(output["logits"], batch["classes"], weight=class_weights) + F.smooth_l1_loss(
+                    class_weights: torch.Tensor | None = None,
+                    regression_loss: str = "smooth_l1",
+                    magnitude_weight: float = 0.0) -> torch.Tensor:
+    # L1直接优化绝对误差；默认保留历史训练目标。
+    if regression_loss not in {"smooth_l1", "l1"}:
+        raise ValueError(f"Unknown regression loss: {regression_loss}")
+    regression = F.l1_loss if regression_loss == "l1" else F.smooth_l1_loss
+    loss = F.cross_entropy(output["logits"], batch["classes"], weight=class_weights) + regression(
         output["sentiment"], batch["sentiment"]
     )
+    if magnitude_weight:
+        nonzero = batch["classes"] != 1
+        if nonzero.any():
+            loss = loss + magnitude_weight * F.smooth_l1_loss(
+                output["magnitude"][nonzero], batch["sentiment"][nonzero].abs())
+    return loss
 
 
 def distillation_loss(output: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -171,6 +223,19 @@ def consistency_loss(clean: dict[str, torch.Tensor], masked: dict[str, torch.Ten
     classification = F.kl_div(student_log_prob, teacher_prob, reduction="batchmean") * 4
     regression = F.smooth_l1_loss(masked["sentiment"], clean["sentiment"].detach())
     return classification + regression
+
+
+def supervised_contrastive_loss(clean: torch.Tensor, masked: torch.Tensor,
+                                labels: torch.Tensor, temperature: float) -> torch.Tensor:
+    """把同类融合表示及同一样本的两种视图作为正例。"""
+    features = F.normalize(torch.cat((clean, masked), 0).float(), dim=-1)
+    targets = labels.repeat(2)
+    similarity = features @ features.T / temperature
+    eye = torch.eye(len(targets), dtype=torch.bool, device=targets.device)
+    positives = (targets[:, None] == targets[None, :]) & ~eye
+    log_probability = similarity - torch.logsumexp(similarity.masked_fill(eye, -1e4), dim=1,
+                                                    keepdim=True)
+    return -(log_probability * positives).sum(1).div(positives.sum(1).clamp_min(1)).mean()
 
 
 def metrics(classes: np.ndarray, sentiment: np.ndarray, logits: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
@@ -339,11 +404,17 @@ def main() -> None:
     parser.add_argument("--evaluation-seed", type=int, default=None)
     parser.add_argument("--distill-weight", type=float, default=0.1)
     parser.add_argument("--corruption-probability", type=float, default=0.75)
+    parser.add_argument("--clean-supervision-weight", type=float, default=0.35)
+    parser.add_argument("--selection-scope", choices=("all", "clean"), default="all")
+    parser.add_argument("--ema-decay", type=float, default=0.0,
+                        help="大于0时用参数指数滑动平均权重验证和保存检查点")
     parser.add_argument("--fusion", choices=("gate", "concat"), default="gate")
     parser.add_argument("--text-mode", choices=("tokens", "bert"), default="bert",
                         help="使用可训练词嵌入或题目提供的上下文 BERT 特征")
     parser.add_argument("--bert-finetune", action=argparse.BooleanOptionalAction, default=False,
-                        help="用完整 raw_text 微调 BERT；只允许在附件2训练标签上更新权重")
+                        help="以 text_bert 或 raw_text token 微调 BERT；只用附件2训练标签更新权重")
+    parser.add_argument("--init-checkpoint", type=Path, default=None,
+                        help="从同结构的冻结BERT检查点初始化融合层，再微调BERT")
     parser.add_argument("--bert-model-name", default=DEFAULT_BERT)
     parser.add_argument("--bert-model-revision", default=DEFAULT_BERT_REVISION)
     parser.add_argument("--bert-freeze-bottom-layers", type=int, default=8)
@@ -389,9 +460,20 @@ def main() -> None:
                         help="局部缺失率上界，默认取自附件3实测分布")
     parser.add_argument("--architecture", choices=ARCHITECTURES, default="baseline",
                         help="baseline 为门控融合；fuse 为 FUSE-Net 风格三因子分解")
+    parser.add_argument("--text-residual", action=argparse.BooleanOptionalAction, default=False,
+                        help="在FUSE分类头保留文本编码器的直接证据")
+    parser.add_argument("--hierarchical-head", action=argparse.BooleanOptionalAction, default=False,
+                        help="先预测中性，再预测非中性极性")
+    parser.add_argument("--text-polarity-head", action=argparse.BooleanOptionalAction, default=False,
+                        help="层级头用文本表征判断极性，缺失文本时回退到融合表征")
     parser.add_argument("--drop-modalities", nargs="+", default=None,
                         choices=["text", "audio", "vision"],
                         help="永久遮蔽指定模态，用于单模态基线")
+    parser.add_argument("--regression-loss", choices=("smooth_l1", "l1"), default="smooth_l1")
+    parser.add_argument("--magnitude-weight", type=float, default=0.0)
+    parser.add_argument("--supcon-weight", type=float, default=0.0)
+    parser.add_argument("--supcon-temperature", type=float, default=0.1)
+    parser.add_argument("--auxiliary-scale", type=float, default=1.0)
     parser.add_argument("--tau", type=float, default=0.1, help="对比分离的温标（仅 fuse）")
     parser.add_argument("--kl-beta", type=float, default=1e-2, help="变分信息瓶颈 KL 权重（仅 fuse）")
     parser.add_argument("--contrast-weight", type=float, default=0.1)
@@ -406,13 +488,19 @@ def main() -> None:
             or args.transformer_layers < 1 or args.transformer_heads < 1
             or 128 % args.transformer_heads != 0
             or not 0 <= args.whole_probability <= 1
+            or not 0 <= args.clean_supervision_weight <= 1
+            or not 0 <= args.ema_decay < 1
             or not 0 <= args.overlap_probability <= 1
             or any(not 0 < ratio <= 1 for ratio in args.interval_ratios)
             or not 0 <= args.local_rate_min <= args.local_rate_max <= 1
+            or args.auxiliary_scale < 0 or args.magnitude_weight < 0
+            or args.supcon_weight < 0 or args.supcon_temperature <= 0
             or args.bert_warmup_epochs < 0
             or args.bert_learning_rate <= 0 or args.bert_freeze_bottom_layers < 0
             or args.bert_max_length < 50 or args.gradient_accumulation_steps < 1
-            or (args.bert_finetune and args.text_mode != "bert")):
+            or (args.bert_finetune and args.text_mode != "bert")
+            or (args.init_checkpoint is not None and not args.bert_finetune)
+            or (args.text_polarity_head and not args.hierarchical_head)):
         parser.error("epochs, batch-size, patience and lr must be positive; dropout in [0, 1); "
                      "whole/overlap probability in [0, 1]; interval ratios in (0, 1]; "
                      "local rate range must satisfy 0 <= min <= max <= 1; BERT settings must be valid")
@@ -443,6 +531,10 @@ def main() -> None:
     if args.normalize_inputs:
         model.fit_input_stats(train_data)
         print("fitted audio/vision normalization from training split only")
+    warm_start = None
+    if args.init_checkpoint is not None:
+        warm_start = initialize_from_frozen_checkpoint(model, args.init_checkpoint, model_config(args))
+        print(f"warm-started fusion model from {warm_start['path']} (epoch={warm_start['epoch']})")
     drop = tuple(args.drop_modalities or ())
     if drop:
         print(f"permanently dropping modalities: {', '.join(drop)}")
@@ -470,6 +562,11 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     if args.amp and not use_amp:
         print("AMP is enabled only on CUDA; continuing in full precision")
+    ema_parameters = [p for p in model.parameters() if p.requires_grad] if args.ema_decay else []
+    ema_values = [p.detach().clone() for p in ema_parameters]
+    raw_before_ema = None
+    if ema_values:
+        print(f"EMA validation enabled; decay={args.ema_decay:g}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = args.output_dir / "metrics.csv"
     best_score, best_epoch, stale = float("inf"), 0, 0
@@ -482,6 +579,11 @@ def main() -> None:
                                  for m in ("accuracy", "macro_f1", "mae", "pearson")])
         writer.writeheader()
         for epoch in tqdm(range(1, args.epochs + 1), desc="训练轮次", unit="epoch"):
+            if raw_before_ema is not None:
+                with torch.no_grad():
+                    for parameter, value in zip(ema_parameters, raw_before_ema):
+                        parameter.copy_(value)
+                raw_before_ema = None
             phase = "cached"
             if args.bert_finetune:
                 adapting = args.bert_update and epoch > args.bert_warmup_epochs
@@ -520,8 +622,12 @@ def main() -> None:
                       if use_amp else contextlib.nullcontext()):
                     clean_out = model(*model_inputs(clean))
                     masked_out = model(*model_inputs(masked))
-                    loss = (0.35 * supervised_loss(clean_out, clean, class_weights)
-                            + 0.65 * supervised_loss(masked_out, masked, class_weights)
+                    loss = (args.clean_supervision_weight * supervised_loss(
+                                clean_out, clean, class_weights, args.regression_loss,
+                                                   args.magnitude_weight)
+                            + (1 - args.clean_supervision_weight) * supervised_loss(
+                                masked_out, masked, class_weights, args.regression_loss,
+                                                   args.magnitude_weight)
                             + 0.05 * consistency_loss(clean_out, masked_out))
                     if args.text_mode == "tokens":
                         loss += args.distill_weight * distillation_loss(clean_out, clean)
@@ -531,9 +637,14 @@ def main() -> None:
                             tau=args.tau, kl_beta=args.kl_beta, contrast_weight=args.contrast_weight,
                             info_weight=args.info_weight, dual_weight=args.dual_weight,
                             mrc_weight=args.mrc_weight, cross_weight=args.cross_weight)
-                        loss = loss + reg["total"]
+                        loss = loss + args.auxiliary_scale * reg["total"]
                         for name in REG_FIELDS:
                             reg_totals[name] += float(reg.get(name, reg["total"].new_zeros(())).detach())
+                        if args.supcon_weight:
+                            contrastive = supervised_contrastive_loss(
+                                clean_out["pooled"], masked_out["pooled"],
+                                masked["classes"], args.supcon_temperature)
+                            loss = loss + args.supcon_weight * contrastive
                 group_start = (batch_index // args.gradient_accumulation_steps) * args.gradient_accumulation_steps
                 accumulation = min(args.gradient_accumulation_steps,
                                    len(batch_offsets) - group_start)
@@ -545,16 +656,27 @@ def main() -> None:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     scaler.step(optimizer)
                     scaler.update()
+                    if ema_values:
+                        with torch.no_grad():
+                            for averaged, parameter in zip(ema_values, ema_parameters):
+                                averaged.mul_(args.ema_decay).add_(
+                                    parameter.detach(), alpha=1 - args.ema_decay)
                     optimizer.zero_grad(set_to_none=True)
                 total_loss += float(loss.detach())
                 batches += 1
                 batch_bar.set_postfix(loss=f"{total_loss / batches:.4f}")
 
+            if ema_values:
+                with torch.no_grad():
+                    raw_before_ema = [parameter.detach().clone() for parameter in ema_parameters]
+                    for parameter, averaged in zip(ema_parameters, ema_values):
+                        parameter.copy_(averaged)
             view_metrics = evaluate(
                 model, valid_data, args.batch_size, device, evaluation_seed(args), text_encoder,
                 evaluation_protocol=args.evaluation_protocol,
                 local_rate_range=(args.local_rate_min, args.local_rate_max), drop=drop)
-            score = selection_score(view_metrics)
+            selected_views = {"clean": view_metrics["clean"]} if args.selection_scope == "clean" else view_metrics
+            score = selection_score(selected_views)
             row = {"epoch": epoch, "train_loss": total_loss / max(1, batches), "val_score": score,
                    "bert_phase": phase, "bert_lr": args.bert_learning_rate if phase == "joint" else 0.0}
             reg_summary = ""
@@ -591,6 +713,8 @@ def main() -> None:
                     "bert_text_stats": bert_text_stats,
                     "compact_bert_state": args.bert_finetune,
                     "bert_phase": phase,
+                    "ema_decay": args.ema_decay,
+                    "warm_start": warm_start,
                 }, args.output_dir / "best.pt")
             else:
                 stale += 1
@@ -604,8 +728,10 @@ def main() -> None:
     run["data_root"] = str(args.data_root) if args.data_root else "default"
     run["config"] = str(args.config) if args.config else None
     run["output_dir"] = str(args.output_dir)
+    run["init_checkpoint"] = str(args.init_checkpoint) if args.init_checkpoint else None
     run.update({"device_used": str(device), "torch_version": torch.__version__,
                 "cuda_version": torch.version.cuda, "best_epoch": best_epoch,
+                "warm_start": warm_start,
                 "bert_text_stats": bert_text_stats,
                 "elapsed_seconds": round(time.time() - started, 2)})
     (args.output_dir / "run.json").write_text(json.dumps(run, indent=2), encoding="utf-8")

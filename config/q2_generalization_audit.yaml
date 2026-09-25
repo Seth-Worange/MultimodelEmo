@@ -1,0 +1,7 @@
+# 固定历史FUSE检查点，比较训练集和验证集的同口径完整输入结果。
+diagnose:
+  checkpoint: outputs/runs/fuse_s2026/best.pt
+  data_root: data
+  output: outputs/diagnostics/goal67/fuse_generalization.json
+  batch_size: 64
+  device: cuda

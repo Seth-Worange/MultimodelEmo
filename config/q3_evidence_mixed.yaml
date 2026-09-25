@@ -1,0 +1,11 @@
+# 固定问题三输出，在无标签样本上比较证据窗口与同模态随机窗口。
+evidence:
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2026/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2027/best.pt
+  evidence_csv: outputs/predictions_q3_mixed/q3_evidence_windows.csv
+  data_root: data
+  output: outputs/diagnostics/goal67/q3_evidence_faithfulness.json
+  device: cuda

@@ -21,6 +21,7 @@ from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text,
                         mask_full_text_attention, prepare_bert_inputs)
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel
+from model.complementary_net import ComplementaryAffectiveModel
 from model.cica_net import CICAAffectiveModel
 from model.input_processing import fill_legacy_input_buffers
 
@@ -72,6 +73,8 @@ def build_from_config(config: dict | None) -> torch.nn.Module:
     architecture = config.pop("architecture", "baseline")
     if architecture == "fuse":
         return FactorizedAffectiveModel(**config)
+    if architecture == "complementary":
+        return ComplementaryAffectiveModel(**config)
     if architecture == "cica":
         return CICAAffectiveModel(**config)
     config.pop("tau", None)
@@ -377,12 +380,20 @@ def main() -> None:
                                                        min(window_row["position_end_exclusive"], len(positions)))
                           if positions[i] is not None] if positions else []
                 timed = item_alignment.get("token_match_fraction", 0.0) >= 0.9 and bool(mapped)
+                local_text = batch["text_mask"][0, window_row["position_start"]:
+                                                window_row["position_end_exclusive"]]
+                matched_fraction = len(mapped) / max(1, int(local_text.sum().item()))
+                complete_window = matched_fraction >= 0.999
+                scope = row["evidence_scope"]
+                time_status = ("mapped_full_transcript" if scope == "aligned_transcript" and complete_window
+                               else "mapped_partial_window") if timed else item_alignment.get("status", "position_only")
                 evidence = {"id": sample_id, "rank_global": rank, **window_row,
                             "evidence_words": mapped_word_text(mapped) if timed else "",
-                            "evidence_scope": row["evidence_scope"],
+                            "evidence_scope": scope,
+                            "mapped_position_fraction": min(1.0, matched_fraction),
                             "start_seconds": min(p["start"] for p in mapped) if timed else "",
                             "end_seconds": max(p["end"] for p in mapped) if timed else "",
-                            "alignment_status": "mapped" if timed else item_alignment.get("status", "position_only")}
+                            "alignment_status": time_status}
                 explanations.append(evidence)
         predictions.append(row)
 

@@ -1,0 +1,15 @@
+evaluate:
+  checkpoint:
+  - outputs/runs/fuse_s2026/best.pt
+  - outputs/runs/fuse_s2027/best.pt
+  - outputs/runs/q2_fuse_lowaux_s2026/best.pt
+  - outputs/runs/q2_fuse_lowaux_s2027/best.pt
+  - outputs/diagnostics/bottleneck_audit_20260924/fuse_norm_only_s2026/best.pt
+  - outputs/diagnostics/bottleneck_audit_20260924/fuse_norm_only_s2027/best.pt
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  seed: 2026
+  evaluation_protocol: sample_v2
+  output: outputs/diagnostics/goal67/mixed_norm_valid.json

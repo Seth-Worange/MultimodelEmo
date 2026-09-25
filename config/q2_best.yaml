@@ -1,0 +1,40 @@
+# 附件2验证集四视图均优于旧门控双模型的现有候选；各检查点训练配置单独保留。
+evaluate:
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2026/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2027/best.pt
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  seed: 2026
+  evaluation_protocol: sample_v2
+  neutral_zero: true
+  output: outputs/diagnostics/goal67/q2_best_valid.json
+
+robustness:
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2026/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2027/best.pt
+  data_root: data
+  device: cuda
+  batch_size: 64
+  neutral_zero: true
+  output: outputs/diagnostics/goal67/q2_best_robustness.csv
+
+infer:
+  part: q2
+  checkpoint:
+    - outputs/runs/fuse_s2026/best.pt
+    - outputs/runs/fuse_s2027/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2026/best.pt
+    - outputs/runs/q2_fuse_lowaux_s2027/best.pt
+  data_root: data
+  device: cuda
+  neutral_zero: true
+  output_dir: outputs/predictions_q2_best
+  max_samples: 0

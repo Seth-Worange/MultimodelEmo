@@ -359,3 +359,110 @@ seed2028配对训练与验证已完成。下一步针对强情感组做signed与
 新增`bert_input_source: text_bert`直接使用三通道原始输入；旧检查点默认raw_text，保持历史推理方式。新增`bert_warmup_epochs`先冻结BERT且关闭其dropout，训练下游网络；之后解冻顶部原定层。冻结通过no_grad实现，不改变参数保存范围。日志和检查点记录bert_phase，若最优模型来自预热期，不得将其称为微调提升。
 
 配对配置：`config/q2_fuse_bert_aligned_frozen.yaml`全程冻结，`config/q2_fuse_bert_aligned_finetune.yaml`预热2轮后以1e-5更新顶部2层。两者实际batch32、累积1次、任务lr1e-3、相同seed/增强/归一化/sample_v2评估。各自使用独立输出目录，不覆盖此前失败实验。依次用`python -m scripts.train --config <配置路径>`训练，再用`python -m scripts.evaluate --config <同一配置路径>`验证。先比较这两份配对结果，再单独评估长文本扩展；新方案尚无完整训练指标。
+
+
+## 2026-09-25：面向valid Acc/F1 0.67的损失消融（进行中）
+
+目标仍为附件2验证集Acc或macro-F1达到0.67，同时改善MAE；以历史FUSE集成MAE 0.5729及中性置零0.5628为比较点，0.55作为进取方向，不将单项超过阈值视为全面完成。保持中性为独立类别，不使用test选型、不使用附件3/4标签。
+
+重新读取历史FUSE集成728条valid预测：负/中/正F1为0.6833/0.4987/0.7164。199条绝对强度>1的样本，真实平均绝对强度1.7705，预测0.8606，MAE 0.9861。原始分组统计保存在`outputs/diagnostics/goal67/baseline_errors.json`；它来自历史已存预测，尚不代表本轮重训结果。当前本地两份aligned BERT对照目录无结果文件，不能声称已验证其优劣。
+
+本轮只增加可选`regression_loss`（默认smooth_l1，候选l1）及`auxiliary_scale`（默认1，候选0.1），默认行为不变。分别与标准化FUSE同seed2026比较：`config/q2_fuse_l1.yaml`仅改变回归损失，`config/q2_fuse_lowaux.yaml`仅降低分解/重建正则总权重。两份统一patience5，上限30；历史标准化对照patience4、上限40且最佳epoch2，这一点需在比较中保留。四视图sample_v2验证和选择分数不变，不为了达到目标修改评估口径。
+
+命令：`python -m scripts.train --config config/q2_fuse_l1.yaml`；低辅助损失同理换为`config/q2_fuse_lowaux.yaml`。独立验证：`python -m scripts.evaluate --config <同一配置>`。输出独立保存在`outputs/runs/q2_fuse_l1_s2026`及`q2_fuse_lowaux_s2026`。pytorch环境15项测试通过，包含L1数值/梯度和历史默认目标一致性；GPU对照训练正在进行，性能结论待结果补充。
+
+首轮GPU训练已完成：L1最佳epoch6，clean Acc/F1/MAE为0.5962/0.5950/0.5786，未优于标准化对照，暂不采用。低辅助损失最佳epoch2，clean为0.6415/0.6313/0.5718，相对同seed标准化对照0.6223/0.6192/0.5739有小幅共同改善，但尚未超过历史两种子集成的分类指标。第二seed2027复核已启动，配置`config/q2_fuse_lowaux_s2027.yaml`。冻结BERT的CLS+词位均值RBF SVM/SVR探针（`scripts.probe_pooled`、`config/q2_pooled_probe.yaml`）C=1/10的Acc为0.6236/0.6305，F1为0.6087/0.5869，共用SVR MAE0.6257，未超过复杂模型；它仅是文本诊断，不作为三模态方案。无任何结果达到目标，不能标为突破。
+
+第二seed2027完整训练最佳epoch2：clean Acc/F1/MAE=0.6442/0.6253/0.6130，回归收益不稳定。独立两seed集成复评（`config/q2_fuse_lowaux_ensemble.yaml`，报告`outputs/diagnostics/goal67/lowaux_ensemble_valid.json`）clean=0.6456/0.6295/0.5711，local=0.6497/0.6333/0.5728，whole=0.6291/0.6138/0.5856，interval=0.6058/0.5870/0.6099。没有超过历史最佳集成的clean Acc/F1，仅MAE微降0.0018；不替换默认模型、不宣称突破。所有本轮进程已结束，未运行test。下一步应针对中性边界、分类概率与强度耦合以及过早过拟合进行有对照的结构/优化实验，不能继续仅凭单seed调辅助权重宣称收益。
+
+
+## 2026-09-25：小学习率与分类回归耦合复核
+
+从`config/q2_fuse_norm_only.yaml`生成配对小学习率配置，二者均seed2026、lr=3e-4、patience7、同一sample_v2评估，只比较`regression_mode=soft`和`signed`。训练已结束，soft最优epoch2：clean Acc/F1/MAE=0.6223/0.6140/0.5943；signed最优epoch2：0.6195/0.6155/0.5874。两者未超过现存候选；没有证据支持单纯降低学习率或独立signed头能达到目标。
+
+预先固定的等权集成对照：历史FUSE双种子+低辅助损失双种子（4模型）valid clean Acc/F1/MAE=0.6566/0.6386/0.5686；额外加入标准化FUSE双种子后（6模型）为0.6456/0.6313/0.5631；改为额外加入门控基线双种子后为0.6552/0.6372/0.5624。三者各有权衡，目前0.67未达到，且不能依赖在同一验证集上不断搜索集成组合制造虚高结果。完整checkpoint来源和SHA256分别记录在`outputs/diagnostics/goal67/mixed_ensemble_valid.json`、`mixed_norm_valid.json`、`mixed_availability_valid.json`。
+
+新实施可选`magnitude_weight`，仅对非中性训练样本增加绝对强度Smooth-L1，默认0使历史配置不变。`config/q2_fuse_magnitude.yaml`固定为0.3并仅作单变量对照，GPU训练进行中。数值和梯度测试通过；收益需要验证集证明。
+
+强度监督单模型训练完整结束，最佳epoch=2，clean Acc/F1/MAE=0.6181/0.6145/0.5755；相对同seed标准化对照未改善，因此不采用。为检查复杂因子分解是否稀释文本证据，新增默认关闭的`text_residual`：对编码后的有效文本位置池化，经零初始化分类残差头直接加到融合logits；文本缺失时残差严格为零。配置`config/q2_fuse_textresidual.yaml`，17项测试通过；完整训练指标待补。
+
+
+## 2026-09-25：问题三预测更新与中性层级头
+
+重新检查本地新增的BERT配对对照：`q2_fuse_bert_aligned_frozen_s2026`最佳epoch7，valid clean Acc/F1/MAE=0.6058/0.5805/0.6081；`q2_fuse_bert_aligned_finetune_s2026`最佳epoch5（joint），0.6003/0.5954/0.5829。微调相较同配置冻结组改善F1与MAE，但Acc下降，而且二者均低于历史FUSE集成，因此没有BERT突破。完整来源在各自`validation_metrics.json`与`metrics.csv`。
+
+文本残差单模型（`config/q2_fuse_textresidual.yaml`）训练完成，最佳epoch3，valid clean Acc/F1/MAE=0.6305/0.6240/0.5936，未达到目标。保留开关供后续研究，默认关闭，不替换历史模型。
+
+问题三原配置使用门控BiGRU两种子；在附件2完整验证集上clean Acc/F1/MAE=0.6319/0.6192/0.5804。新`config/q3_mixed.yaml`使用事先在附件2验证集选出的FUSE四模型集成，统一代理对照为0.6566/0.6386/0.5686，Acc +2.47个百分点、Macro-F1 +1.94个百分点、MAE -0.0118。已重跑附件4全部20个无标签样本，保存`outputs/predictions_q3_mixed/`；这是附件2验证集上的改进，**不是附件4准确率**。新推理将证据窗口的时间状态区分为完整转写与局部映射：875个窗口中725个完整、150个局部（07、18各75）；局部窗口只报告已对齐词位，不补造末尾词时间。时间、比例不变量核查通过，计数文件`outputs/diagnostics/goal67/q3_mixed_coverage.json`。直接以强度小于0.1改判中性的规则使验证Acc从0.6566降到0.6511，已否决。
+
+针对中性F1瓶颈增加可选`hierarchical_head`，以“中性/非中性→非中性极性”计算归一化三分类对数概率，默认关闭。`config/q2_fuse_hierarchical.yaml`只改变分类头，GPU训练进行中；18项测试通过，包括概率和两个头的梯度。
+
+层级分类头`config/q2_fuse_hierarchical.yaml`完整训练结束，最佳epoch4，valid clean Acc/F1/MAE=0.6236/0.6053/0.6038，未解决中性瓶颈。Q3证据独立保留窗口审计（`scripts.evaluate_q3_evidence`）显示，仅按删除分数排名第一的窗口在20条中只有11条比同模态不重叠随机窗口更充分；报告`outputs/diagnostics/goal67/q3_evidence_faithfulness.json`。新`refine_q3_evidence.py`对每条前10个删除候选补算单窗口保留分数，用两种正向证据的较小值排序；`outputs/predictions_q3_mixed/q3_selected_evidence.csv`记录两种数值及映射，20/20条均有删除与保留分数同时为正的候选，比原首位的17/20更可审查。这是同批候选上的筛选改善，不作为独立测试集上的解释泛化收益。
+
+面向单模型目标新增`model/complementary_net.py`：文本保持CLS与有效词位BiGRU摘要，音视频分别摘要，拼接单模态与成对交互后进行轻量融合；保持缺失掩码、训练集音视频标准化与现有三分类/回归任务。`config/q2_complementary.yaml`与标准化FUSE使用相同seed、增强、sample_v2验证；19项测试通过，GPU训练中。尚无其验证性能结论。
+
+
+### 最终复评与目标边界（2026-09-25）
+
+`q2_complementary.yaml`轻量晚期融合单模型训练/独立复评完成，最佳epoch2，valid clean Acc/F1/MAE=0.6195/0.6102/0.6167；未优于FUSE，作为被否决的结构尝试保留，不用于默认提交。中性层级头、文本残差、强度辅助监督和小学习率两种模式也都未产生单模型突破。当前可复核单模型尚无Acc或macro-F1达到0.67的检查点。
+
+四模型等权集成加入“预测中性则强度归零”后，附件2 valid clean Acc/F1/MAE=0.6566/0.6386/0.5571，详见`outputs/diagnostics/goal67/mixed_neutral_valid.json`；相比问题三旧门控双种子clean Acc/F1/MAE=0.6319/0.6192/0.5804，分别为Acc +2.47个百分点、F1 +1.94个百分点、MAE下降0.0233。该收益仅在有标签的附件2验证集上验证，不能写作附件4无标签样本准确率。试探性的验证集logit类别偏置网格虽在同集上最高见0.6635 Acc/F1 0.6457，但这是同集搜索，且仍不到0.67，未应用于模型或专项结果。
+
+问题三最终候选配置`config/q3_mixed_neutral.yaml`，实际输出`outputs/predictions_q3_mixed_neutral/`。20条预测中4条为中性，强度确认为0；875个时间窗口中725完整、150局部映射，局部窗口均属于07/18；20条最终证据的删除与保留分数均为正，详情`q3_selected_evidence.csv`及摘要。双向筛选从同一批候选中选择，20/20是筛选条件满足数，不是独立标注的解释正确率。实际时间映射仍需人工核对WhisperX对齐误差，尤其局部覆盖样本。最终问题三若选择该方案，需使用`python -m scripts.infer --config config/q3_mixed_neutral.yaml`，再运行`python -m scripts.refine_q3_evidence --config config/q3_evidence_refine_neutral.yaml`。
+
+目前用户总体目标未完全达到：需要进一步得到并复核一个Acc或macro-F1达到0.67、且MAE表现突出的单模型，或至少更稳健的集成候选。后续优先对中性/弱情感错误进行数据与表征诊断，并用训练集内部划分控制结构搜索；不能以不断在同一valid上试权重或阈值来制造伪增益。
+
+
+## 2026-09-25：BERT互补性与Q3完整场景训练
+
+直接用附件2 valid逐样本预测比较四模型FUSE集成与`q2_fuse_bert_aligned_finetune_s2026`：BERT微调单模型可纠正前者45条错误，却把前者原本正确的86条判错。固定25% BERT概率混合时clean Acc/F1从0.6566/0.6386降至0.6401/0.6271；MAE从0.5686到0.5607，中性置零后从0.5571到0.5538，但分类明显受损，未纳入最终候选。这个对照只在valid做诊断，不对同一valid继续调权重。
+
+冻结BERT CLS+有效词位均值、声画有效位置均值/方差的SVC/SVR探针（PCA和标准化仅在train拟合）四组合最佳Acc=0.6387、最佳F1=0.6207，MAE>=0.6392；脚本`probe_multimodal.py`、配置`q2_multimodal_probe.yaml`、原始结果`outputs/diagnostics/goal67/multimodal_probe/report.json`。它未证明三模态表示可由简单池化更好地分离，未替换深度模型。
+
+核查现有443条epoch记录，单模型最高clean Acc=0.6552（`soft_mask_safe_s2026`，F1=0.6240、MAE=0.5947），最高F1=0.6313（`q2_fuse_lowaux_s2026`，Acc=0.6415、MAE=0.5718）；并无已经训练却未被综合选模保存的0.67单模型轮次。Q3专用配置`config/q3_fuse_clean_train.yaml`将完整样本监督权重设为0.7、缺失概率0.3，以clean验证视图选轮次；其余沿用标准化FUSE。原默认0.35/综合四视图不变。GPU训练中，收益需以新checkpoint复评后判定。
+
+
+### 完整输入训练与类别表征消融（2026-09-25）
+
+`q3_fuse_clean_train.yaml`已训练完成：将完整监督权重从0.35调到0.7、缺失概率0.8降到0.3，并仅以clean valid选模，最佳epoch2，valid clean Acc/F1/MAE=0.6126/0.6091/0.5803。该训练方案不如既有FUSE集成，也未超过同seed标准化FUSE；不用于最终问题三预测。考虑到同时变更多个训练项，不能由此单独归因于任何一项。
+
+为了更直接解决负/中/正融合表征的混杂，在FUSE完整与缺失两视图的池化表示上增加可选监督对比损失：同类为正例、不同类为负例，同一样本两视图必然成对；默认权重0保持历史配置不变。`config/q2_fuse_supcon.yaml`设权重0.05、温度0.1，其他取自`q2_fuse_norm_only.yaml`。20项测试通过，GPU训练中；尚无可靠性能结论。
+
+监督对比损失单seed训练完成：`q2_fuse_supcon_s2026`最佳epoch2，clean Acc/F1/MAE=0.6154/0.6135/0.5818，未超过同seed标准化FUSE；不采用。对历史`fuse_s2026`检查点按同一完整输入口径评估：train Acc/F1/MAE=0.6878/0.6799/0.5511，valid=0.6209/0.6202/0.5750，差值约6.69/5.97个百分点及0.02396 MAE；训练中性召回0.7032、验证0.6413。原始`outputs/diagnostics/goal67/fuse_generalization.json`可复核。该结果支持泛化瓶颈存在，但不能把它全归因于某一个辅助损失。
+
+辅助损失权重设为0时`q2_fuse_noaux_s2026`最佳epoch2，clean Acc/F1/MAE=0.6374/0.6307/0.5755，相对同seed标准化FUSE分类改善、MAE略差。第二种子`q2_fuse_noaux_s2027`已启动。固定的历史FUSE四模型+安全掩码门控双种子六模型，clean Acc/F1/MAE=0.6552/0.6356/0.5595，低于四模型+中性归零候选0.6566/0.6386/0.5571；报告`outputs/diagnostics/goal67/mixed_safemask_valid.json`，不替换默认Q3输出。
+
+零辅助损失第二种子`q2_fuse_noaux_s2027`完整训练最佳epoch4，clean Acc/F1/MAE=0.6291/0.5966/0.5882，未复现第一种子的F1收益；不作为替换方案。历史FUSE四模型+安全掩码门控双种子六模型也没有提升clean，详见上一节。
+
+问题二推荐配置`config/q2_best.yaml`只用于评估、鲁棒性分析和附件3推理；其四个检查点均已由各自历史配置训练。与旧`config/q2.yaml`门控双种子在相同附件2 valid `sample_v2`/seed2026上比较，四个视图的Acc、macro-F1、MAE均改善：旧clean/local/whole/interval F1=0.6192/0.6120/0.6108/0.5632、MAE=0.5804/0.5793/0.5833/0.6334；新F1=0.6386/0.6355/0.6184/0.5956、MAE=0.5571/0.5591/0.5720/0.5908。旧新完整结果分别为`outputs/diagnostics/goal67/q2_old_availability_valid.json`与`q2_best_valid.json`。后者独立重算与此前`mixed_neutral_valid.json`四视图数值一致。附件3 30条无标签样本已通过`config/q2_best.yaml`重新生成`outputs/predictions_q2_best/q2_predictions.csv`，其中11条预测中性且强度=0；不能据此计算附件3准确率。45种缺失形态与位置条件的验证扫描`q2_best_robustness.csv`已生成，完整输入首行与独立评估完全一致。当前`q2.yaml`保留历史门控训练与对照，避免将其输出误认为推荐结果；README列出新推荐命令。
+
+## 2026-09-25：从数据、输入一致性与损失梯度重新审计
+
+`scripts/audit_q2_data.py`只读取附件2 train/valid，并在训练集拟合标准化、64维PCA和固定参数线性分类器。样本数3395/728，负/中/正分布967/758/1670与206/184/338；分类标签与回归标签符号0条冲突。两切分没有相同视频来源。自然视觉整段零特征为训练110条、验证15条；在有内容的文本词位内，音频有效率训练/验证约99.9%/99.7%，视觉约94.5%/94.3%。这说明额外的人工缺失并非唯一缺失来源。PCA探针在验证集上：文本Acc/F1=0.643/0.596，音频=0.459/0.316，视觉=0.459/0.358，音视频=0.468/0.359，三模态直接拼接=0.640/0.594。简单池化与线性模型有明显能力限制，这些数字只用于判断融合难点，不能作为各模态的性能上界；报告为`outputs/diagnostics/goal67/q2_data_audit.json`。
+
+附件3对齐文件实际字段为`audio/text_bert/vision`，没有`raw_text`；附件4有`raw_text`。因此使用完整`raw_text`作为唯一BERT输入的模型虽然能在附件2训练和验证，但无法对附件3执行相同数据流程。问题二后续BERT微调应以`text_bert`三通道token/attention/type为统一输入；这里的`text_bert`是BERT输入，不是768维预计算的`text`。完整转写实验仅作附件2研究对照，不能直接作为问题二专项提交模型。已有`text_bert`配对控制中，冻结BERT组clean Acc/F1/MAE=0.6058/0.5805/0.6081，顶层微调组=0.6003/0.5954/0.5829；微调改善F1与MAE，但未超过冻结特征FUSE方案。
+
+`scripts/audit_q2_errors.py`对照现有FUSE四模型集成与`text_bert`微调模型的同一728条valid逐样本预测。后者相对前者有45条改对、86条改错；中性类召回0.538→0.609，正类召回0.722→0.592；弱非零情感准确率0.483→0.361。完整强度切片见`outputs/diagnostics/goal67/q2_error_slices.json`。因此微调的主要退化集中在正向与弱情感，不应只看总体MAE或训练损失。
+
+`scripts/audit_q2_objective.py`在固定8条训练样本上按实际训练权重计算FUSE检查点的损失与梯度。原标准化FUSE的分类/回归/信息增益项损失约0.403/0.321/0.174；信息增益项作用于音频输入层的梯度范数0.0196，与分类项0.0195接近。低辅助FUSE中对应项为0.0156，而分类项梯度0.1504。单批梯度只能提出假设，不能证明某项必然有害。为验证该假设，`config/q2_fuse_info_light.yaml`相对标准化FUSE只把`info_weight`由0.1降到0.01，同seed、同`sample_v2`协议训练与独立评估；最佳epoch2 clean Acc/F1/MAE=0.5975/0.5957/0.5809，低于原标准化FUSE的0.6223/0.6192/0.5739。结论是单独调小信息增益项没有改善，保留为被否决实验，不替换当前`q2_best.yaml`。
+
+## 2026-09-25：按模态分工的分类头与集成检验
+
+相同valid顺序上，历史纯文本模型有462/728条正确，当前FUSE四模型478/728条正确；前者独对42条，后者独对58条，两者都错208条。按真实类别看，FUSE相对纯文本净增加中性正确23条，负向净减少5条、正向净减少2条。这只支持“中性受益、极性可能受干扰”的设计假设，不说明AV单模态能直接预测中性。先验固定50/50概率混合纯文本与FUSE4，clean Acc/F1/MAE=0.6511/0.6302/0.5673（中性归零），低于四模型0.6566/0.6386/0.5571，故不采用。
+
+`model/fuse_net.py`新增可选`text_polarity_head`：层级头用融合池化表征判中性、文本池化表征判非中性极性；文本缺失时退回融合表征。默认关闭，旧检查点完全兼容。配置`config/q2_fuse_text_polarity.yaml`相对低辅助FUSE同时启用层级头和文本极性头，最佳epoch3；独立复评clean Acc/F1/MAE=0.6250/0.6087/0.5892，低于低辅助FUSE的0.6415/0.6313/0.5718。interval视图Acc=0.6168相对低辅助0.5893较高，但clean和其他视图总体退化，不能取代主模型。再做一个不调验证权重的固定等权五模型对照：FUSE4加入该新结构后clean Acc/F1/MAE=0.6552/0.6372/0.5565；MAE只改善0.0006，分类略差，故`config/q2_fuse_specialized_ensemble.yaml`仅作否定对照。验证报告见`outputs/diagnostics/goal67/text_polarity_valid.json`及`q2_specialized_ensemble_valid.json`。
+
+## 2026-09-25：参数EMA平滑检验与目标边界
+
+低辅助FUSE新增可选训练参数`ema_decay`，在参数更新后维护指数滑动平均，并使用EMA参数做每轮验证和保存最优检查点；默认0保持旧行为。`config/q2_fuse_lowaux_ema.yaml`与低辅助seed2026对照只改变EMA=0.98、早停耐心5→6（额外轮次用于检查平滑是否延后峰值）。最佳epoch3，独立复评clean Acc/F1/MAE=0.6497/0.6290/0.5727；原低辅助为0.6415/0.6313/0.5718。Acc提高0.82个百分点，但F1和MAE略退化，不是单模型0.66突破。固定等权FUSE4+EMA五模型clean=0.6552/0.6368/0.5561，相比现有四模型0.6566/0.6386/0.5571，MAE仅改善0.0010，分类略降；whole F1有所提高但interval下降，故不更新默认检查点。结果为`outputs/diagnostics/goal67/q2_fuse_lowaux_ema_valid.json`及`q2_ema_ensemble_valid.json`。
+
+当前四模型在728条valid上正确478条（Acc=0.6566）；达到0.66需正确至少481条，即多3条。478/728的精确二项95%区间约[0.6208,0.6911]，且未计入多次在同一valid上选模型带来的选择偏差。因此不应针对这3条继续在valid上扫描阈值或集成权重。下一阶段需要先以附件2训练集内部按视频来源划分开发/校准集，在该内部划分上设计少量有因果假设的实验，再将既有valid作为一次外部复核；目标应同时约束clean、local、whole、interval四视图及强弱情感误差。
+
+
+## 2026-09-25：文献驱动的冻结融合层起步、低学习率BERT实验
+
+查阅Howard与Ruder的ULMFiT（ACL 2018，https://aclanthology.org/P18-1031/），其核心相关启示是分阶段、区分层的微调；同时参考DPDF-LQ（EMNLP 2025，https://aclanthology.org/2025.emnlp-main.571/）对全局与局部线索的区分。此前从头同时训练融合模型与BERT顶层的配对实验，`text_bert`版本best clean Acc/F1/MAE约0.6003/0.5954/0.5829，难以确认退化来自融合层重初始化还是BERT更新。本次只检验前一因素：从`q2_fuse_lowaux_s2026/best.pt`加载已收敛的FUSE权重，保留官方BERT底层预训练权重，仅以5e-6更新顶部2层、3e-5更新任务层，保持原缺失增强、损失与sample_v2评估。该策略是受分阶段微调启发的本题适配，并非复现文献完整模型。使用`text_bert`，附件3同样具备此字段；训练标签仅来自附件2训练集。
+
+配置为`config/q2_fuse_bert_warmstart.yaml`，实现`--init-checkpoint`及结构键严格匹配检查，避免从不相容检查点静默加载。RTX4060 Laptop GPU完成5轮早停，最佳epoch1。独立复评`outputs/runs/q2_fuse_bert_warmstart_s2026/validation_metrics.json`：clean Acc/F1/MAE=0.6456/0.6305/0.5772；local=0.6401/0.6237/0.5785；whole=0.6250/0.6091/0.5860；interval=0.5975/0.5824/0.6293。起始低辅助单模型clean=0.6415/0.6313/0.5718；现有四模型集成clean=0.6566/0.6386/0.5571。故本次未取得全面提升，不替换默认模型。训练损失从epoch1约0.9继续下降，验证选择分数在epoch2至5均劣于epoch1，支持小数据上快速过拟合的判断，但单seed不足以证明普遍规律。
+
+本轮独立验证正常结束并保存最佳检查点；训练结束时，新增的`init_checkpoint`路径未被`run.json`序列化导致训练命令退出码1，已修复该记录问题，历史检查点和`metrics.csv`不受影响。后续优先以训练集内部按视频分组的开发划分检验条件性音视频残差或局部证据聚合；附件2只有3395训练样本、音视觉单模态线性探针valid Acc各约0.459，现有证据不支持盲目增大融合结构。附件3缺少`raw_text`与768维`text`，因此跨附件一致部署仍需以`text_bert`接口或统一重处理视频为准。
