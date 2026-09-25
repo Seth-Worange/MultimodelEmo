@@ -32,10 +32,13 @@ class Q1Config:
     visual_probe_fps: float = 5.0
     # Existing fused archives remain MediaPipe-native; the separate selector's
     # candidate default is OpenFace68 and does not relabel historical outputs.
-    visual_backend: str = "mediapipe478"
+    visual_backend: str = "openface68"
     final_visual_backend_candidate: str = "openface68"
-    visual_feature_schema: str = "mediapipe478_xyz52_blendshape"
-    crop_margin_s: float = 0.30
+    visual_feature_schema: str = "openface68_xy_au_pose_gaze_v1"
+    alignment_margin_s: float = 0.30
+    openface_confidence_threshold: float = 0.50
+    openface_timestamp_tolerance_s: float = 0.06
+    face_validity_threshold: float = 0.50
     extra_speech_tolerance_s: float = 0.15
     extra_speech_min_duration_s: float = 0.20
     asr_mfa_high_max_disagreement_s: float = 0.10
@@ -58,7 +61,6 @@ class Q1Config:
     face_model_sha256: str | None = None
     inference_device: str = "cpu"
     max_faces: int = 2
-    min_face_detection_confidence: float = 0.5
     min_face_presence_confidence: float = 0.5
     min_tracking_confidence: float = 0.5
     nearest_visual_max_distance_s: float | None = None
@@ -87,6 +89,16 @@ class Q1Config:
     def mediapipe_native_landmark_indices(self) -> tuple[int, ...]:
         """One authoritative native MediaPipe topology for Round-4/5 extraction."""
         return tuple(range(478))
+
+    @property
+    def crop_margin_s(self) -> float:
+        """Compatibility alias; alignment_margin_s is the single source."""
+        return self.alignment_margin_s
+
+    @property
+    def min_face_detection_confidence(self) -> float:
+        """Compatibility alias for the MediaPipe detection threshold."""
+        return self.face_validity_threshold
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)

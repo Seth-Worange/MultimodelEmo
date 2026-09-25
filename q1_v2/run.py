@@ -1,4 +1,4 @@
-"""End-to-end, resumable Question 1 v2 feature pipeline."""
+"""Legacy MediaPipe Q1 v2 pipeline; Round-5.1 uses final_pipeline instead."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from .io_utils import directory_size, read_json, sha256_file, write_json
 from .media import inspect_and_extract_media
 from .quality import build_quality_reports
 from .text_features import extract_text_features
-from .visual_features import extract_visual_features
+from .visual_backend import MediaPipe478Backend
 
 
 def _utc_now() -> str:
@@ -160,19 +160,9 @@ def process_sample(
         if config.face_model_path is None:
             raise FileNotFoundError("--face-model is required for MediaPipe Face Landmarker")
         current_stage = "visual"
-        visual = extract_visual_features(
-            record.video_path,
-            media.video_frames,
-            alignment.words,
-            face_model_path=Path(config.face_model_path),
+        visual = MediaPipe478Backend(Path(config.face_model_path)).extract_native(
+            record.video_path, media.video_frames, alignment.words, config, staging,
             selected_landmarks=config.selected_landmarks,
-            sampling_fps=config.visual_fps,
-            max_faces=config.max_faces,
-            min_face_detection_confidence=config.min_face_detection_confidence,
-            min_face_presence_confidence=config.min_face_presence_confidence,
-            min_tracking_confidence=config.min_tracking_confidence,
-            nearest_max_distance_s=config.nearest_visual_max_distance_s,
-            output_dir=staging,
         )
         current_stage = "fusion"
         build_fused_sample(
@@ -288,6 +278,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.face_model is not None and args.face_model.is_file() else None
     )
     config = Q1Config(
+        visual_backend="mediapipe478",
+        visual_feature_schema="mediapipe_legacy38_xyz52_blendshape",
         visual_fps=args.visual_fps,
         face_model_path=str(args.face_model.resolve()) if args.face_model is not None else None,
         face_model_sha256=face_model_hash,

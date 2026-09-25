@@ -3,11 +3,13 @@
 import csv
 import io
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 
+from q1_v2.alignment import WordAlignment
 from q1_v2.alignment_confidence import confidence, map_official_to_asr
 from q1_v2.config import Q1Config
 from q1_v2.correspondence_qa import vad_extra_speech
@@ -18,6 +20,10 @@ from q1_v2.openface_backend import associate_openface_with_pts, feature_schema, 
 from q1_v2.stage2_qa import second_stage_decision
 from q1_v2.visual_scene_qa import visual_scene_decision
 from q1_v2.visual_backend import extract_with_backend
+from q1_v2.visual_backend import MediaPipe478Backend, OpenFace68Backend, make_visual_backend
+from q1_v2.final_schema import feature_schema as frozen_feature_schema, validate_package
+from q1_v2.final_schema import visual_schema as frozen_visual_schema
+from q1_v2.final_pipeline import _nullable_bool, _package, _quality_block, select_smoke_ids
 
 
 def _official(count=100):
@@ -259,9 +265,154 @@ def test_visual_backend_unknown_rejected():
                              alignments=[], config=Q1Config())
 
 
+def test_frozen_default_openface68():
+    config = Q1Config()
+    assert config.visual_backend == "openface68"
+    assert config.alignment_margin_s == config.crop_margin_s == .30
+    assert config.openface_confidence_threshold == config.face_validity_threshold == .5
+
+
+def test_visual_backend_factory_modes():
+    assert isinstance(make_visual_backend(Q1Config(), face_model=None,
+                                          openface_executable=Path("openface.exe")), OpenFace68Backend)
+    from dataclasses import replace
+    assert isinstance(make_visual_backend(replace(Q1Config(), visual_backend="mediapipe478"),
+                                          face_model=Path("face.task"), openface_executable=None),
+                      MediaPipe478Backend)
+
+
+def test_frozen_openface_block_dimensions():
+    schema = frozen_visual_schema("openface68", Q1Config())
+    assert [block["word_dimension"] for block in schema["blocks"]] == [272, 70, 12, 16]
+    assert sum(block["word_dimension"] for block in schema["blocks"]) == 370
+    assert schema["stored_as_separate_blocks"]
+
+
+def test_frozen_mediapipe_baseline_schema():
+    schema = frozen_visual_schema("mediapipe478", Q1Config())
+    assert [block["frame_dimension"] for block in schema["blocks"]] == [1434, 52]
+
+
+def test_frozen_package_schema_no_pickle():
+    schema = frozen_feature_schema("openface68", Q1Config())
+    assert schema["npz_loading"] == "np.load(path, allow_pickle=False)"
+    assert schema["speaker_identity_verified"] is False
+
+
+@pytest.mark.parametrize("source,expected", [(None, -1), ("", -1), (False, 0), (True, 1), ("false", 0), ("true", 1)])
+def test_frozen_nullable_quality_flag(source, expected):
+    assert int(_nullable_bool(source)) == expected
+
+
 def test_npz_no_pickle():
     buffer = io.BytesIO()
     np.savez_compressed(buffer, geometry=np.ones((2, 136), dtype=np.float32), mask=np.array([True, False]))
     buffer.seek(0)
     with np.load(buffer, allow_pickle=False) as archive:
         assert archive["geometry"].shape == (2, 136)
+
+
+@pytest.mark.parametrize("qa,expected", [
+    ({"correspondence_status": "MATCHED", "speech_present": True,
+      "english_speech_likely": True, "face_present": True},
+     {"correspondence_status": "MATCHED", "speech_status": "SPEECH_PRESENT",
+      "language_status": "ENGLISH", "face_status": "FACE_PRESENT"}),
+    ({"correspondence_status": "NO_SPEECH", "speech_present": False,
+      "english_speech_likely": False, "face_present": False},
+     {"correspondence_status": "NO_SPEECH", "speech_status": "NO_SPEECH",
+      "language_status": "NOT_APPLICABLE", "face_status": "NO_FACE"}),
+    ({"correspondence_status": "NON_ENGLISH_SPEECH", "speech_present": "True",
+      "english_speech_likely": "False", "face_present": None},
+     {"correspondence_status": "NON_ENGLISH_SPEECH", "speech_status": "SPEECH_PRESENT",
+      "language_status": "NON_ENGLISH", "face_status": "UNKNOWN"}),
+])
+def test_frozen_quality_block(qa, expected):
+    assert _quality_block(qa) == expected
+
+
+def _synthetic_package(target: Path, sample_id: str = "videoX__0") -> None:
+    record = SampleRecord(
+        sample_id=sample_id, video_id="videoX", clip_id="0", text="Hello world",
+        video_path=target / "source.mp4", source_row=2,
+        original_words=[OriginalWord(0, "Hello", 0, 5), OriginalWord(1, "world", 6, 11)])
+    record.video_path.write_bytes(b"synthetic")
+    words = 2
+    alignments = [WordAlignment(sample_id, 0, "Hello", "hello", 0.1, 0.4, 1, ""),
+                  WordAlignment(sample_id, 1, "world", "world", 0.5, 0.9, 1, "")]
+    text = SimpleNamespace(features=np.ones((words, 768), dtype=np.float32),
+                           mask=np.ones(words, dtype=np.uint8))
+    audio = SimpleNamespace(
+        word_features=np.ones((words, 138), dtype=np.float32),
+        word_mask=np.ones(words, dtype=np.uint8),
+        frame_features=np.ones((3, 69), dtype=np.float32),
+        frame_times_s=np.array([0.0, 0.01, 0.02]), frame_start_samples=np.array([0, 160, 320]),
+        f0_valid_mask=np.ones(3, dtype=np.uint8),
+        word_frame_indices=[[0, 1], [2]], word_failure_reasons=["", ""])
+    frames = 4
+    visual = SimpleNamespace(
+        backend="openface68",
+        frame_blocks={"landmark_geometry": np.ones((frames, 136), dtype=np.float32),
+                      "action_units": np.ones((frames, 35), dtype=np.float32),
+                      "head_pose": np.ones((frames, 6), dtype=np.float32),
+                      "gaze": np.ones((frames, 8), dtype=np.float32)},
+        word_blocks={"landmark_geometry": np.ones((words, 272), dtype=np.float32),
+                     "action_units": np.ones((words, 70), dtype=np.float32),
+                     "head_pose": np.ones((words, 12), dtype=np.float32),
+                     "gaze": np.ones((words, 16), dtype=np.float32)},
+        frame_indices=np.arange(frames, dtype=np.int32),
+        frame_times_s=np.array([0.1, 0.2, 0.3, 0.4]),
+        frame_mask=np.ones(frames, dtype=np.uint8), word_mask=np.ones(words, dtype=np.uint8),
+        word_sampled_frame_counts=np.full(words, 2, dtype=np.int32),
+        word_valid_face_counts=np.full(words, 2, dtype=np.int32),
+        word_original_frame_indices=[[0, 1], [2, 3]])
+    qa = {"correspondence_status": "MATCHED", "route": "HIGH_CONFIDENCE_MATCH",
+          "speech_present": True, "english_speech_likely": True, "face_present": True}
+    _package(record, target, qa, {"usable_face_present": True},
+             alignments, ["LOW", "HIGH"], text, audio, visual,
+             mfa_policy="REUSED_VERIFIED_REAL_MFA")
+
+
+def test_frozen_package_validate_round_trip(tmp_path):
+    _synthetic_package(tmp_path)
+    assert validate_package(tmp_path, "videoX__0", backend="openface68") == []
+    with np.load(tmp_path / "feature_package.npz", allow_pickle=False) as archive:
+        assert str(archive["speech_status"].item()) == "SPEECH_PRESENT"
+        assert str(archive["language_status"].item()) == "ENGLISH"
+        assert str(archive["face_status"].item()) == "FACE_PRESENT"
+    metadata = (tmp_path / "feature_package_metadata.json").read_text(encoding="utf-8")
+    assert '"correspondence_status"' in metadata
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    _synthetic_package(broken)
+    with np.load(broken / "feature_package.npz", allow_pickle=False) as archive:
+        payload = {name: archive[name] for name in archive.files}
+    payload["word_text"] = payload["word_text"][:1]
+    np.savez_compressed(broken / "feature_package.npz", **payload)
+    assert any(item.startswith("word_length_mismatch") for item in
+               validate_package(broken, "videoX__0", backend="openface68"))
+
+
+def test_select_smoke_ids_includes_non_english(tmp_path):
+    qa_root, round5_root = tmp_path / "r4", tmp_path / "r5"
+    (round5_root / "qa").mkdir(parents=True)
+    qa_root.mkdir()
+    with (qa_root / "correspondence_audit.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["sample_id", "correspondence_status", "route"])
+        writer.writeheader()
+        writer.writerows([
+            {"sample_id": "ne__0", "correspondence_status": "NON_ENGLISH_SPEECH",
+             "route": "INVALID_CORRESPONDENCE"},
+            {"sample_id": "ok__0", "correspondence_status": "MATCHED",
+             "route": "HIGH_CONFIDENCE_MATCH"},
+            {"sample_id": "ok__1", "correspondence_status": "MATCHED",
+             "route": "HIGH_CONFIDENCE_MATCH"},
+        ])
+    with (round5_root / "qa" / "correspondence_audit_round5.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["sample_id", "visual_scene_status"])
+        writer.writeheader()
+        writer.writerows([{"sample_id": "ok__0", "visual_scene_status": "NORMAL_FACE_VIDEO"},
+                          {"sample_id": "ok__1", "visual_scene_status": "NORMAL_FACE_VIDEO"}])
+    selected = select_smoke_ids(qa_root, round5_root)
+    assert len(selected) == len(set(selected)) == 10
+    assert selected[8] == "ne__0"
+    assert selected[9] in {"ok__0", "ok__1"}

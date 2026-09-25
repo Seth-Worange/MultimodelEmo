@@ -46,8 +46,10 @@ def write_landmark_definition(output_dir: Path) -> None:
         "The CMU Multimodal SDK repository was also reviewed: "
         "https://github.com/CMU-MultiComp-Lab/CMU-MultimodalSDK\n\n"
         "These are different topologies. Round-4 results must not be described "
-        "as OpenFace-compatible 68-point features. An actual OpenFace backend "
-        "remains unimplemented and untested.\n",
+        "as OpenFace-compatible 68-point features. Since Round 5 a real "
+        "OpenFace 2.2.0 FeatureExtraction backend (OpenFace68Backend) is "
+        "implemented and validated on representative videos; Round-4 fused "
+        "archives remain MediaPipe-native and are not relabeled.\n",
         encoding="utf-8",
     )
 

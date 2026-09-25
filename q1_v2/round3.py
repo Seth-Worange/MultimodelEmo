@@ -9,6 +9,7 @@ import os
 import shutil
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
@@ -26,7 +27,8 @@ from .quality import (
     write_word_review_reports,
 )
 from .text_features import TextFeatureResult
-from .visual_features import VisualFeatureResult, extract_visual_features
+from .visual_features import VisualFeatureResult
+from .visual_backend import MediaPipe478Backend
 
 
 TARGETS = {"-3g5yACwYnA__2": "polymer", "-3g5yACwYnA__3": "adhesives"}
@@ -223,16 +225,10 @@ def compare_visual(baseline: Path, output: Path, face_model: Path) -> list[dict]
                 raise FileExistsError(sample_dir)
             started = time.perf_counter()
             try:
-                visual = extract_visual_features(
+                visual = MediaPipe478Backend(face_model).extract_native(
                     video_path, frame_timings, alignments,
-                    face_model_path=face_model,
+                    replace(config, visual_fps=float(fps)), sample_dir,
                     selected_landmarks=config.selected_landmarks,
-                    sampling_fps=float(fps),
-                    max_faces=config.max_faces,
-                    min_face_detection_confidence=config.min_face_detection_confidence,
-                    min_face_presence_confidence=config.min_face_presence_confidence,
-                    min_tracking_confidence=config.min_tracking_confidence,
-                    nearest_max_distance_s=None, output_dir=sample_dir,
                 )
             except Exception as exc:
                 write_json(sample_dir / "_FAILED.json", {"sample_id": sample_id, "fps": fps, "error": repr(exc)})

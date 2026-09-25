@@ -273,6 +273,7 @@ def aggregate_openface_words(
 def run_one(
     *, video_path: Path, media_metadata: Path, output_dir: Path,
     executable: Path, visual_fps: float = 10.0, timeout_s: int = 900,
+    confidence_min: float = 0.5, timestamp_tolerance_s: float = .06,
 ) -> dict[str, Any]:
     if not executable.is_file():
         raise FileNotFoundError(executable)
@@ -293,9 +294,10 @@ def run_one(
     candidates = sorted(native_dir.glob("*.csv"))
     if len(candidates) != 1:
         raise ValueError(f"Expected exactly one OpenFace CSV, got {candidates}")
-    parsed, schema = parse_openface_csv(candidates[0])
+    parsed, schema = parse_openface_csv(candidates[0], confidence_min=confidence_min)
     media = read_json(media_metadata)
-    associated = associate_openface_with_pts(parsed, media["video_frames"], fps=visual_fps)
+    associated = associate_openface_with_pts(parsed, media["video_frames"], fps=visual_fps,
+                                              timestamp_tolerance_s=timestamp_tolerance_s)
     _archive(output_dir / "openface68_frames.npz", associated, schema)
     trace = [{
         "original_frame_index": row["original_frame_index"],
@@ -316,6 +318,8 @@ def run_one(
     schema["source_video_sha256"] = sha256_file(video_path)
     schema["openface_raw_csv"] = str(candidates[0])
     schema["visual_fps"] = visual_fps
+    schema["openface_confidence_threshold"] = confidence_min
+    schema["timestamp_tolerance_s"] = timestamp_tolerance_s
     write_json(output_dir / "openface_feature_schema.json", schema)
     result = {
         "status": "success", "sampled_frame_count": len(associated),

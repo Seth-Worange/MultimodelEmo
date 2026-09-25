@@ -9,8 +9,12 @@ from __future__ import annotations
 import argparse
 import csv
 import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+
+import numpy as np
 
 from .alignment import WordAlignment
 from .config import Q1Config
@@ -18,10 +22,145 @@ from .data_loader import load_samples
 from .io_utils import read_json, write_json
 from .media import VideoFrameTiming
 from .openface_backend import aggregate_openface_words, run_one
-from .visual_features import extract_visual_features
+from .visual_features import VisualFeatureResult, extract_visual_features
 
 
 BACKENDS = ("mediapipe478", "openface68")
+
+
+@dataclass
+class VisualBackendResult:
+    backend: str
+    frame_blocks: dict[str, np.ndarray]
+    word_blocks: dict[str, np.ndarray]
+    frame_indices: np.ndarray
+    frame_times_s: np.ndarray
+    frame_mask: np.ndarray
+    word_mask: np.ndarray
+    word_sampled_frame_counts: np.ndarray
+    word_valid_face_counts: np.ndarray
+    word_original_frame_indices: list[list[int]]
+    source_dir: Path
+
+
+class VisualBackend(ABC):
+    """Only entry point used by the final feature pipeline for visual work."""
+
+    @abstractmethod
+    def extract(
+        self, video_path: Path, frame_timings: Sequence[VideoFrameTiming],
+        alignments: Sequence[WordAlignment], config: Q1Config, output_dir: Path,
+        *, media_metadata: Path,
+    ) -> VisualBackendResult:
+        raise NotImplementedError
+
+
+class MediaPipe478Backend(VisualBackend):
+    def __init__(self, face_model: Path):
+        self.face_model = face_model
+
+    def extract_native(
+        self, video_path: Path, frame_timings: Sequence[VideoFrameTiming],
+        alignments: Sequence[WordAlignment], config: Q1Config, output_dir: Path,
+        *, selected_landmarks: Sequence[int] | None = None,
+    ) -> VisualFeatureResult:
+        """Compatibility bridge for the archived Q1 MediaPipe fusion schema."""
+        return extract_visual_features(
+            video_path, frame_timings, alignments,
+            face_model_path=self.face_model,
+            selected_landmarks=selected_landmarks or config.mediapipe_native_landmark_indices,
+            sampling_fps=config.visual_fps, max_faces=config.max_faces,
+            min_face_detection_confidence=config.face_validity_threshold,
+            min_face_presence_confidence=config.min_face_presence_confidence,
+            min_tracking_confidence=config.min_tracking_confidence,
+            nearest_max_distance_s=None, output_dir=output_dir,
+        )
+
+    def extract(
+        self, video_path: Path, frame_timings: Sequence[VideoFrameTiming],
+        alignments: Sequence[WordAlignment], config: Q1Config, output_dir: Path,
+        *, media_metadata: Path,
+    ) -> VisualBackendResult:
+        native = self.extract_native(video_path, frame_timings, alignments, config, output_dir)
+        geometry_dim = len(config.mediapipe_native_landmark_indices) * 3
+        frame = native.frame_features
+        word = native.word_features
+        return VisualBackendResult(
+            backend="mediapipe478",
+            frame_blocks={"landmark_geometry": frame[:, :geometry_dim],
+                          "blendshape": frame[:, geometry_dim:]},
+            word_blocks={
+                "landmark_geometry": np.concatenate(
+                    [word[:, :geometry_dim], word[:, frame.shape[1]:frame.shape[1] + geometry_dim]], axis=1),
+                "blendshape": np.concatenate(
+                    [word[:, geometry_dim:frame.shape[1]], word[:, frame.shape[1] + geometry_dim:]], axis=1),
+            },
+            frame_indices=native.original_frame_indices,
+            frame_times_s=native.frame_times_s,
+            frame_mask=native.detection_mask.astype(bool),
+            word_mask=native.word_mask.astype(bool),
+            word_sampled_frame_counts=native.word_frame_counts,
+            word_valid_face_counts=native.word_valid_face_counts,
+            word_original_frame_indices=native.word_original_frame_indices,
+            source_dir=output_dir,
+        )
+
+
+class OpenFace68Backend(VisualBackend):
+    def __init__(self, executable: Path):
+        self.executable = executable
+
+    def extract(
+        self, video_path: Path, frame_timings: Sequence[VideoFrameTiming],
+        alignments: Sequence[WordAlignment], config: Q1Config, output_dir: Path,
+        *, media_metadata: Path,
+    ) -> VisualBackendResult:
+        if not output_dir.joinpath("openface_result.json").is_file():
+            run_one(video_path=video_path, media_metadata=media_metadata,
+                    output_dir=output_dir, executable=self.executable,
+                    visual_fps=config.visual_fps,
+                    confidence_min=config.openface_confidence_threshold,
+                    timestamp_tolerance_s=config.openface_timestamp_tolerance_s)
+        elif not output_dir.joinpath("openface68_frames.npz").is_file():
+            raise RuntimeError("Existing OpenFace result lacks frame NPZ")
+        aggregate_openface_words(output_dir / "openface68_frames.npz", alignments, output_dir)
+        with np.load(output_dir / "openface68_frames.npz", allow_pickle=False) as archive:
+            frame = {name: archive[name].copy() for name in
+                     ("landmark_geometry", "action_units", "head_pose", "gaze")}
+            indices = archive["original_frame_indices"].copy()
+            times = archive["sample_times_s"].copy()
+            frame_mask = (archive["face_valid_mask"] & archive["timestamp_mapping_mask"]).copy()
+        with np.load(output_dir / "openface68_word_features.npz", allow_pickle=False) as archive:
+            word = {name: archive[f"word_{name}"].copy() for name in frame}
+            word_mask = archive["word_visual_mask"].copy()
+            sampled = archive["word_sampled_frame_counts"].copy()
+            valid_counts = archive["word_valid_face_frame_counts"].copy()
+        with (output_dir / "openface68_word_trace.csv").open("r", encoding="utf-8-sig", newline="") as handle:
+            trace = list(csv.DictReader(handle))
+        original_indices = [
+            [int(item) for item in row["original_frame_indices"].split(",") if item]
+            for row in trace
+        ]
+        return VisualBackendResult(
+            backend="openface68", frame_blocks=frame, word_blocks=word,
+            frame_indices=indices, frame_times_s=times, frame_mask=frame_mask,
+            word_mask=word_mask, word_sampled_frame_counts=sampled,
+            word_valid_face_counts=valid_counts,
+            word_original_frame_indices=original_indices, source_dir=output_dir,
+        )
+
+
+def make_visual_backend(config: Q1Config, *, face_model: Path | None,
+                        openface_executable: Path | None) -> VisualBackend:
+    if config.visual_backend == "openface68":
+        if openface_executable is None:
+            raise ValueError("OpenFace68 requires an executable")
+        return OpenFace68Backend(openface_executable)
+    if config.visual_backend == "mediapipe478":
+        if face_model is None:
+            raise ValueError("MediaPipe478 requires a face model")
+        return MediaPipe478Backend(face_model)
+    raise ValueError(f"Unknown visual backend: {config.visual_backend}")
 
 
 def _read_real_alignments(source: Path) -> list[WordAlignment]:
@@ -60,7 +199,9 @@ def extract_with_backend(
             result = extract_visual_features(
                 video_path, frames, alignments, face_model_path=face_model,
                 selected_landmarks=config.mediapipe_native_landmark_indices,
-                sampling_fps=config.visual_fps, output_dir=output_dir,
+                sampling_fps=config.visual_fps,
+                min_face_detection_confidence=config.face_validity_threshold,
+                output_dir=output_dir,
             )
             write_json(result_path, {
                 "backend": backend, "frame_dimension": int(result.frame_features.shape[1]),
@@ -77,7 +218,9 @@ def extract_with_backend(
     if not result_path.is_file():
         run_one(video_path=video_path, media_metadata=media_metadata,
                 output_dir=output_dir, executable=openface_executable,
-                visual_fps=config.visual_fps)
+                visual_fps=config.visual_fps,
+                confidence_min=config.openface_confidence_threshold,
+                timestamp_tolerance_s=config.openface_timestamp_tolerance_s)
     if alignments:
         aggregate_openface_words(output_dir / "openface68_frames.npz", alignments, output_dir)
     return read_json(result_path)

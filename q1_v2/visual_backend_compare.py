@@ -16,7 +16,7 @@ from .data_loader import load_samples
 from .io_utils import read_json, write_csv, write_json
 from .media import VideoFrameTiming
 from .openface_backend import aggregate_openface_words
-from .visual_features import extract_visual_features
+from .visual_backend import MediaPipe478Backend
 
 
 FIELDS = (
@@ -66,10 +66,8 @@ def run_comparison(*, data_root: Path, round4_root: Path, output_dir: Path,
             media = read_json(source / "media_metadata.json")
             frames = [VideoFrameTiming(**item) for item in media["video_frames"]]
             started = time.perf_counter()
-            result = extract_visual_features(
-                by_id[sample_id].video_path, frames, alignments,
-                face_model_path=face_model, selected_landmarks=config.mediapipe_native_landmark_indices,
-                sampling_fps=config.visual_fps, output_dir=target,
+            result = MediaPipe478Backend(face_model).extract_native(
+                by_id[sample_id].video_path, frames, alignments, config, target,
             )
             write_json(result_path, {
                 "runtime_s": time.perf_counter() - started,

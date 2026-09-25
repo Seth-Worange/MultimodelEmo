@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import sys
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -26,12 +27,15 @@ def resolve_data_root(path: str | Path | None = None) -> Path:
 def read_pickle(path: str | Path) -> Any:
     """Read trusted contest pickles, including files written with NumPy 2 paths."""
     # The supplied files are trusted local inputs; never unpickle arbitrary downloads.
-    import numpy as np
-
     if "numpy._core" not in sys.modules:
-        sys.modules["numpy._core"] = np.core
-        sys.modules["numpy._core.numeric"] = np.core.numeric
-        sys.modules["numpy._core.multiarray"] = np.core.multiarray
+        try:
+            numpy_core = import_module("numpy._core")
+        except ModuleNotFoundError:
+            numpy_core = import_module("numpy.core")
+        sys.modules["numpy._core"] = numpy_core
+        for module_name in ("numeric", "multiarray"):
+            module = import_module(f"{numpy_core.__name__}.{module_name}")
+            sys.modules[f"numpy._core.{module_name}"] = module
     with Path(path).open("rb") as f:
         return pickle.load(f)
 

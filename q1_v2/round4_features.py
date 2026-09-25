@@ -26,7 +26,7 @@ from .fusion_alignment import build_fused_sample, validate_fused_output
 from .io_utils import read_json, sha256_file, write_csv, write_json
 from .media import MediaResult, inspect_and_extract_media, write_pcm16_wav
 from .text_features import TextFeatureResult, extract_text_features
-from .visual_features import extract_visual_features
+from .visual_backend import MediaPipe478Backend
 
 
 def unavailable_alignment(record: SampleRecord, reason: str) -> list[WordAlignment]:
@@ -316,17 +316,8 @@ def process_one(
                 if media.audio_timestamp_reliable and len(media.waveform) else _empty_audio(record, config)
             )
         stage = "visual"
-        visual = extract_visual_features(
-            record.video_path, media.video_frames, alignment,
-            face_model_path=face_model,
-            selected_landmarks=config.mediapipe_native_landmark_indices,
-            sampling_fps=config.visual_fps,
-            max_faces=config.max_faces,
-            min_face_detection_confidence=config.min_face_detection_confidence,
-            min_face_presence_confidence=config.min_face_presence_confidence,
-            min_tracking_confidence=config.min_tracking_confidence,
-            nearest_max_distance_s=None,
-            output_dir=sample_dir,
+        visual = MediaPipe478Backend(face_model).extract_native(
+            record.video_path, media.video_frames, alignment, config, sample_dir,
         )
         stage = "fusion"
         build_fused_sample(
@@ -395,7 +386,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--alignment-source requires exactly one --sample-id")
     if args.reuse_native_source is not None and len(args.sample_id) != 1:
         raise ValueError("--reuse-native-source requires exactly one --sample-id")
-    config = Q1Config(visual_fps=args.visual_fps, mfa_work_root=str(args.mfa_work_dir.resolve()))
+    config = Q1Config(visual_backend="mediapipe478",
+                      visual_feature_schema="mediapipe478_xyz52_blendshape",
+                      visual_fps=args.visual_fps, mfa_work_root=str(args.mfa_work_dir.resolve()))
     write_json(args.output_dir.resolve() / "feature_experiment_config.json", {
         "config": config.to_dict(),
         "text_model": config.text_model,
