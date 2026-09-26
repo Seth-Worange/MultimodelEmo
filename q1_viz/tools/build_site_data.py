@@ -322,6 +322,7 @@ def build_full_table(summary_rows: dict[str, dict]) -> list[dict]:
             "text": label_row["text"][:46],
             "package_status": pkg.get("processing_status", "not_run"),
             "aligned_words": pkg.get("aligned_word_count"),
+            "mfa_policy": pkg.get("mfa_policy", ""),
         })
     return rows
 
