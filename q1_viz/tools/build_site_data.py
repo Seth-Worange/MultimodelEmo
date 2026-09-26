@@ -334,10 +334,16 @@ def main() -> None:
 
     (ASSETS / "data").mkdir(parents=True, exist_ok=True)
     per_sample_dir = ASSETS / "data"
+    for stale in per_sample_dir.glob("*.json"):
+        stale.unlink()
     for index, sample_id in enumerate(all_ids, 1):
         payload = sample_payload(sample_id)
-        (per_sample_dir / f"{sample_id}.json").write_text(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        # .js loaded via <script> so the page also works opened from file://
+        (per_sample_dir / f"{sample_id}.js").write_text(
+            'window.__SAMPLES__=window.__SAMPLES__||{};window.__SAMPLES__['
+            + json.dumps(sample_id) + "]="
+            + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ";",
+            encoding="utf-8")
         if index % 10 == 0:
             print(f"sample payload {index}/{len(all_ids)}")
 

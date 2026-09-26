@@ -556,11 +556,17 @@ const sampleCache = new Map();
 
 async function loadSample(id) {
   if (sampleCache.has(id)) return sampleCache.get(id);
-  const promise = (async () => {
-    const response = await fetch(`assets/data/${encodeURIComponent(id)}.json`);
-    if (!response.ok) throw new Error(`无法加载样本数据 ${id}（请部署 assets/data/ 目录）`);
-    return response.json();
-  })();
+  const promise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `assets/data/${encodeURIComponent(id)}.js`;
+    script.onload = () => {
+      const payload = (window.__SAMPLES__ || {})[id];
+      if (payload) resolve(payload);
+      else reject(new Error(`样本数据缺失: ${id}`));
+    };
+    script.onerror = () => reject(new Error(`无法加载样本数据 ${id}（请部署 assets/data/ 目录）`));
+    document.head.append(script);
+  });
   sampleCache.set(id, promise);
   try {
     return await promise;
@@ -708,6 +714,7 @@ async function selectTypical(sampleId) {
   const video = $("hero-video");
   $("hero-fallback").style.display = "none";
   video.src = sample.media.video;
+  video.poster = sample.media.thumb;
   video.onerror = () => { $("hero-fallback").style.display = "flex"; };
   $("hero-badge").textContent = `典型样本 · ${sample.id}`;
   bindOverlay(video, $("hero-canvas"), sample);
@@ -1013,6 +1020,7 @@ const inspector = {
     $("insp-fallback").style.display = "none";
     video.dataset.touched = "";
     video.src = sample.media.video;
+    video.poster = sample.media.thumb;
     video.onerror = () => { $("insp-fallback").style.display = "flex"; };
     $("insp-badge").textContent = sample.id;
     bindOverlay(video, $("insp-canvas"), sample);
