@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 from urllib.parse import quote
 
@@ -37,8 +38,8 @@ def make_records(output_dir: Path = OUTPUT, alignment_file: Path = ALIGNMENT) ->
         path = VIDEO_DIR / f"{sample_id}.mp4"
         if not path.is_file():
             raise FileNotFoundError(path)
-        relative = path.relative_to(ROOT)
-        video_url = "../../" + "/".join(quote(part) for part in relative.parts)
+        relative = Path(os.path.relpath(path, output_dir.resolve()))
+        video_url = "/".join(quote(part) for part in relative.parts)
         records.append({
             "id": sample_id,
             "prediction": row,

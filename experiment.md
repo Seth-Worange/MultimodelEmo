@@ -534,3 +534,16 @@ text-only对照的可复核性说明：`outputs/experiments/text_only_test.json`
 **口径说明。** 本轮训练期间并行工作将选型分数改为 `utils/selection.py` 的三视图口径（clean/local/interval，含 `*_delta_*` 退化列）。已核验主模型在新旧两种口径下最优轮次均为 epoch 2，消融链内部共用新口径自选轮次；论文表格全部使用视图原始指标（Acc/F1/MAE/Pearson），与口径无关。
 
 **产物。** 表：`q2_paper/` 下 `q2_basic_performance.csv`、`q2_table_missing_type.csv`、`q2_table_missing_rate.csv`、`q2_table_missing_location.csv`、`q2_table_ablation.csv`、`q2_trend_slopes.csv`、`q2_robustness_full.csv`（77情形全量）、`q2_error_slices.json`。图：`q2_fig_rate_curve.png`（缺失率曲线）、`q2_fig_missing_type.png`（模态类型）、`q2_fig_location.png`（位置）、`q2_fig_ablation.png`（消融）、`q2_fig_heatmap.png`（类型×缺失率热力图），由 `python -m scripts.figures_q2` 一键再生。附件3：`outputs/predictions_fuse_lowaux/q2_predictions.csv`（30条，主模型直接推理，含缺失模态与融合权重列）。种子复核扫描在 `outputs/runs/q2_fuse_lowaux_s2027/robustness.csv`。
+# 2026-09-26：Q2、Q3主线与补充实验
+
+本轮在 main 分支完成，使用 pytorch 环境和 CUDA。最终以 `q2_fuse_lowaux_s2026` 单模型作为 Q2 主线；Q3对完整输入候选重新比较后，同样选择该预测器，另配独立解释流程。
+
+- Q2三视图选模分数：FUSE 0.29216、门控0.29783、CICA 0.30719。完整输入：Accuracy 0.6415、Macro-F1 0.6313、MAE 0.5718、Pearson 0.6723。全部结果未启用中性强度归零。
+- 重评六组历史训练消融，新增无可用模式嵌入训练消融；后者最佳第3轮，主分0.30429。无辅助损失主分0.29281，与主线差距小，不能据单种子宣称显著贡献。
+- 完成165组验证缺失实验：七种连续缺失模态组合、四种位置、10%/20%/40%/60%/80%比例；补充声画短游程和整模态压力测试。记录相对clean的F1/MAE变化及实际遮蔽比例。local局部位置的高比例受区域长度限制，比例趋势主要依据interval实验。
+- Q3完成72条按真实类别分层抽取的验证解释复核；条件增益正比例90.3%，文本Early/Late方向一致率79.1%。模型错误预测也可产生正删除收益，解释忠实性不代表真实情绪正确性。
+- 附件3生成30条预测；附件4生成20条预测及解释卡。严格随机窗口规则确认2条解释，其余保留待核边界，不伪造准确率或视频时间。单检查点稳定性不适用。
+
+统一目录：`outputs/final_experiments/`。可引用的架构、比较表和分析在 `analysis/q2_q3_final_experiments.md`，完整记录在该目录的 `FINAL_REPORT.md`。配置为 `config/final_experiments.yaml`；执行顺序为 `scripts.final_experiments`、`scripts.final_q3_experiments`、`scripts.summarize_final_experiments`。目录内保留日志、逐样本CSV、扰动网格、诊断图、模型哈希和代码快照。
+
+本轮未使用test选模，未执行push、merge或PR。

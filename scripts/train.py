@@ -64,7 +64,8 @@ def build_model(args) -> torch.nn.Module:
             bert_gradient_checkpointing=args.bert_gradient_checkpointing,
             bert_max_length=args.bert_max_length, bert_input_source=args.bert_input_source,
             text_residual=args.text_residual, hierarchical_head=args.hierarchical_head,
-            text_polarity_head=args.text_polarity_head)
+            text_polarity_head=args.text_polarity_head,
+            use_availability_embedding=args.use_availability_embedding)
     return AffectiveModel(fusion=args.fusion, text_mode=args.text_mode,
                           audio_dynamics=args.audio_dynamics,
                           regression_mode=args.regression_mode, dropout=args.dropout,
@@ -100,7 +101,8 @@ def model_config(args) -> dict:
     if args.architecture == "fuse":
         return {**common, "tau": args.tau, "text_residual": args.text_residual,
                 "hierarchical_head": args.hierarchical_head,
-                "text_polarity_head": args.text_polarity_head}
+                "text_polarity_head": args.text_polarity_head,
+                "use_availability_embedding": args.use_availability_embedding}
     if args.architecture == "complementary":
         return {key: common[key] for key in (
             "text_mode", "audio_dynamics", "regression_mode", "dropout",
@@ -457,6 +459,7 @@ def main() -> None:
                         help="三种模态的序列特征编码器")
     parser.add_argument("--transformer-layers", type=int, default=1)
     parser.add_argument("--transformer-heads", type=int, default=4)
+    parser.add_argument("--use-availability-embedding", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--normalize-inputs", action="store_true",
                         help="用训练集有效位置统计量标准化音频与视觉特征")
     parser.add_argument("--pack-aligned-grus", action="store_true",

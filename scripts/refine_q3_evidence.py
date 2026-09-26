@@ -129,7 +129,7 @@ def checkpoint_stability(model, batch: dict, encoder, winner: dict,
                          candidates: list[dict], reference_class: int) -> dict:
     pool = members(model)
     if len(pool) == 1:
-        return {"s_pred": 1.0, "s_mod": 1.0, "s_evidence": 1.0, "n_checkpoints": 1}
+        return {"s_pred": "", "s_mod": "", "s_evidence": "", "n_checkpoints": 1}
     pred_ok = mod_ok = evidence_ok = 0
     for member in pool:
         output = run_model(member, batch)

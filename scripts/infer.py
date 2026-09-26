@@ -72,6 +72,10 @@ class ModelEnsemble(torch.nn.Module):
 def build_from_config(config: dict | None) -> torch.nn.Module:
     """按检查点里记录的结构配置还原模型（缺省为门控基线）。"""
     config = dict(config or {})
+    # 未启用的旧LoRA配置不改变网络结构。
+    if config.get("bert_lora_rank") == 0:
+        for key in ("bert_lora_rank", "bert_lora_alpha", "bert_lora_targets"):
+            config.pop(key, None)
     architecture = config.pop("architecture", "baseline")
     if architecture == "fuse":
         return FactorizedAffectiveModel(**config)

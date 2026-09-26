@@ -1,0 +1,36 @@
+protocol:
+  split: valid
+  seed: 2026
+  evaluation_protocol: sample_v2
+  device: cuda
+  neutral_zero: false
+q2_mainline: outputs/runs/q2_fuse_lowaux_s2026/best.pt
+rates:
+- 0.1
+- 0.2
+- 0.4
+- 0.6
+- 0.8
+locations:
+- start
+- middle
+- end
+- random
+q2_candidates:
+- q2_fuse_lowaux_s2026
+- gate_norm_s2026
+- gate_norm_s2027
+- cica_softca_bigru_s20260924
+- cica_softca_transformer_s20260924
+ablations:
+- ab_nonorm_s2026
+- ab_nofactor_s2026
+- ab_nodynamics_s2026
+- ab_noaux_s2026
+- ab_noaug_s2026
+- ab_aux1_s2026
+q3_candidates:
+  fuse: outputs/runs/q2_fuse_lowaux_s2026/best.pt
+  clean_adapt: outputs/q3_fuse_adapt_s2026/best.pt
+  temporal: outputs/q3_temporal_s2026/best.pt
+  residual: outputs/q3_residual_s2026/best.pt

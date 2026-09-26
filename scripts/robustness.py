@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from utils.augmentation import INTERVAL_RATIOS, mask_batch
+from utils.augmentation import mask_batch
 from utils.data import load_main
 from scripts.infer import load_model
 from utils.config import parse_config_args
@@ -27,9 +30,8 @@ from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text,
 from scripts.train import (as_tensors, attach_full_text_inputs, make_batch, metrics,
                            model_inputs, move_inputs)
 
-DEFAULT_RATES = (0.1, 0.2, 0.4, 0.6)
+DEFAULT_RATES = (0.1, 0.2, 0.4, 0.6, 0.8)
 DEFAULT_LOCATIONS = ("start", "middle", "end", "random")
-INTERVAL_PLANS = (("audio", "vision"), ("text", "audio", "vision"), ("text",))
 
 
 @torch.inference_mode()
@@ -37,27 +39,45 @@ def score_case(model, data, device, batch_size, *, pattern="none", missing_modal
                rate=None, location=None, text_encoder=None, overlap_probability=0.5):
     model.eval()
     logits_all, sentiment_all = [], []
+    removed = {name: 0 for name in missing_modalities}
+    totals = {name: 0 for name in missing_modalities}
     for start in range(0, len(data["tokens"]), batch_size):
         ix = torch.arange(start, min(start + batch_size, len(data["tokens"])))
         batch = make_batch(data, ix)
-        if pattern == "whole":
-            batch = mask_batch(batch, seed=0, probability=1.0,
-                               missing_modalities=missing_modalities)
-        elif pattern == "local":
-            batch = mask_batch(batch, seed=0, probability=1.0,
-                               local_rate=rate, location=location)
-        elif pattern == "interval":
-            batch = mask_batch(batch, seed=0, probability=1.0, pattern="interval",
-                               ratios=(rate,), interval_modalities=missing_modalities,
-                               location=location, overlap_probability=overlap_probability)
+        original_masks = {name: batch[f"{name}_mask"].clone() for name in missing_modalities}
+        if pattern != "none":
+            samples = []
+            for row, sample_id in enumerate(batch["ids"]):
+                identity = json.dumps([2026, pattern, missing_modalities, rate, location, str(sample_id)])
+                seed = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big")
+                item = make_batch(batch, torch.tensor([row]))
+                if pattern == "whole":
+                    item = mask_batch(item, seed=seed, probability=1.0,
+                                      missing_modalities=missing_modalities)
+                elif pattern == "local":
+                    item = mask_batch(item, seed=seed, probability=1.0,
+                                      local_rate=rate, location=location)
+                else:
+                    item = mask_batch(item, seed=seed, probability=1.0, pattern="interval",
+                                      ratios=(rate,), interval_modalities=missing_modalities,
+                                      location=location, overlap_probability=overlap_probability)
+                samples.append(item)
+            keys = ("tokens", "audio", "vision", "text_mask", "audio_mask", "vision_mask")
+            batch = {**batch, **{key: torch.cat([item[key] for item in samples]) for key in keys}}
+        for name in missing_modalities:
+            totals[name] += int(original_masks[name].sum())
+            removed[name] += int((original_masks[name] & ~batch[f"{name}_mask"]).sum())
         batch = move_inputs(batch, device)
         if "text" in missing_modalities and text_encoder is not None:
             batch["teacher"] = encode_text(batch, text_encoder)
         output = model(*model_inputs(batch))
         logits_all.append(output["logits"].cpu().numpy())
         sentiment_all.append(output["sentiment"].cpu().numpy())
-    return metrics(data["classes"].numpy(), data["sentiment"].numpy(),
-                   np.concatenate(logits_all), np.concatenate(sentiment_all))
+    result = metrics(data["classes"].numpy(), data["sentiment"].numpy(),
+                     np.concatenate(logits_all), np.concatenate(sentiment_all))
+    for name in ("text", "audio", "vision"):
+        result[f"actual_rate_{name}"] = removed.get(name, 0) / max(totals.get(name, 0), 1)
+    return result
 
 
 def build_cases(rates, locations) -> list[dict]:
@@ -70,13 +90,10 @@ def build_cases(rates, locations) -> list[dict]:
         for location in locations:
             cases.append({"pattern": "local", "missing_modalities": ("audio", "vision"),
                           "missing_rate": rate, "location": location})
-    for rate in rates:
-        for location in locations:
-            cases.append({"pattern": "interval", "missing_modalities": ("audio", "vision"),
-                          "missing_rate": rate, "location": location})
-        for names in (("text", "audio", "vision"), ("text",), ("audio",), ("vision",)):
-            cases.append({"pattern": "interval", "missing_modalities": names,
-                          "missing_rate": rate, "location": "random"})
+            for size in (1, 2, 3):
+                for names in combinations(("text", "audio", "vision"), size):
+                    cases.append({"pattern": "interval", "missing_modalities": names,
+                                  "missing_rate": rate, "location": location})
     return cases
 
 
@@ -117,7 +134,9 @@ def main() -> None:
         tokenizer = load_text_tokenizer(bert_model_name, bert_revision) if source == "raw_text" else None
         attach_full_text_inputs(data, tokenizer, model.bert_max_length, source)
     rows = []
-    for case in build_cases(args.rates, args.locations):
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    from tqdm.auto import tqdm
+    for case in tqdm(build_cases(args.rates, args.locations), desc="Validation robustness"):
         result = score_case(model, data, device, args.batch_size,
                             pattern=case["pattern"],
                             missing_modalities=case["missing_modalities"],
@@ -129,7 +148,14 @@ def main() -> None:
                "missing_modalities": "+".join(case["missing_modalities"]) or "audio+vision",
                "missing_rate": case["missing_rate"], "location": case["location"],
                "n": len(data["tokens"]), **result}
+        clean = rows[0] if rows else row
+        row.update(delta_macro_f1=row["macro_f1"] - clean["macro_f1"],
+                   delta_mae=row["mae"] - clean["mae"])
         rows.append(row)
+        with args.output.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
         print(f"{row['pattern']:>9} {row['missing_modalities']:>22} "
               f"rate={row['missing_rate']:.1f} {row['location']:>7} "
               f"F1={result['macro_f1']:.4f} MAE={result['mae']:.4f}")
