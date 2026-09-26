@@ -54,7 +54,13 @@ D:\anaconda\envs\q1-v2\python.exe q1_viz/tools/build_site_data.py
 
 ## 特殊情况展示规则
 
-每条样本保留可用模态的全部线索，说明卡位于视频左侧：
+每条样本保留可用模态的全部线索，说明卡位于视频左侧。对 stage-1 判定
+PARTIAL_MATCH 的样本，另有**复核层**（仅作用于这 8 条，不改写 stage-1 判定字段）：
+
+- **归一化复核**（数字词↔数字）：指标达标后整体 MFA 对齐（REVIEWED_NORMALIZED_MFA）。
+- **分段复核**（块链 + 间隙标注）：间隙词全为官方文本之外的插入讲话时，两段文本
+  分别裁剪送 MFA（REVIEWED_BLOCKWISE_MFA），间隙词不进文本。
+- 仍不达标或歧义样本维持保守拦截（复核证据见 review_evidence.json）。
 
 - **文本-音频疑似不一致**（PARTIAL_MATCH）：保守拦截词级对齐（掩码 0、时间 NaN），
   保留文本特征、ASR 词序线索与人脸关键点。

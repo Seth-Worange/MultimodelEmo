@@ -33,6 +33,7 @@ LABEL_XLSX = DATA_ROOT / "label-100.xlsx"
 
 # First displayed typical sample is fixed to -THoVjtIkeU__2 (best human-verified
 # boundary accuracy); the rest cover the story range of the pipeline.
+ONLY_IDS: tuple[str, ...] = ()  # set via CLI --only
 TYPICAL = ["-THoVjtIkeU__2", "-3g5yACwYnA__13", "-3g5yACwYnA__3", "-s9qJ7ATP7w__6", "-NFrJFQijFE__1"]
 
 CURATED_NOTES = {
@@ -191,6 +192,14 @@ def auto_note(sample_id: str, quality: dict, success: dict) -> tuple[str, str]:
                                 f"视觉帧 {frames_valid}/{frames} 有效、词级覆盖 {coverage}%，"
                                 f"缺失词级特征按掩码 0 保留，不做近邻填补。")
     if status == "PARTIAL_MATCH":
+        if mfa.startswith("REVIEWED_NORMALIZED"):
+            return ("文本-音频疑似不一致 · 归一化复核通过", f"自动 QA 判定 PARTIAL_MATCH（REVIEW_REQUIRED）。"
+                    f"复核层以数字词↔数字归一化后重算指标，达到预设阈值（recall/precision/edit ≥ 0.80/0.75/0.70）→ 整体 MFA 对齐 {aligned}/{words} 词。"
+                    f"stage-1 判定字段保留不变，复核证据见 review_evidence.json。人脸线索 {frames_valid}/{frames} 帧。")
+        if mfa.startswith("REVIEWED_BLOCKWISE"):
+            return ("文本-音频疑似不一致 · 分段复核通过", f"自动 QA 判定 PARTIAL_MATCH（REVIEW_REQUIRED）。"
+                    f"复核层块链分析发现文本间插入式额外讲话（间隙词均为官方文本之外），两段文本分别裁剪送 MFA → {aligned}/{words} 词对齐，"
+                    f"间隙词不进文本、不伪造时间。stage-1 判定字段保留不变。人脸线索 {frames_valid}/{frames} 帧。")
         return ("文本-音频疑似不一致", f"自动 QA 判定 PARTIAL_MATCH（REVIEW_REQUIRED）：保守拦截词级对齐（掩码全 0、时间 NaN），"
                                         f"不做错误文本-音频强制对齐。保留 {words} 词文本特征、"
                                         f"声学帧级线索与人脸线索（{frames_valid}/{frames} 帧有效），等待人工复核。")
@@ -322,7 +331,12 @@ def build_full_table(summary_rows: dict[str, dict]) -> list[dict]:
 
 
 def main() -> None:
-    manual_metrics = read_json(R5 / "manual_qa" / "manual_qa_metrics.json")
+    # prefer the corrected-label metrics (2026-09-26 human-verification update);
+    # the frozen round5 copy is kept untouched as the historical record
+    manual_qa_path = FULL / "manual_qa" / "manual_qa_metrics.json"
+    if not manual_qa_path.is_file():
+        manual_qa_path = R5 / "manual_qa" / "manual_qa_metrics.json"
+    manual_metrics = read_json(manual_qa_path)
     boundary = read_json(R5 / "manual_boundary" / "manual_boundary_metrics_overall.json")
     confidence = read_json(R5 / "alignment_confidence" / "alignment_confidence_summary.json")
     face_qa = read_json(R5 / "qa" / "face_qa_metrics.json")
@@ -332,11 +346,13 @@ def main() -> None:
     summary_rows = {row["sample_id"]: row for row in read_csv(FULL / "feature_summary.csv")}
     all_ids = sorted(summary_rows)
 
+    only = set(ONLY_IDS) if ONLY_IDS else None
     (ASSETS / "data").mkdir(parents=True, exist_ok=True)
     per_sample_dir = ASSETS / "data"
     for stale in per_sample_dir.glob("*.json"):
         stale.unlink()
-    for index, sample_id in enumerate(all_ids, 1):
+    target_ids = [sid for sid in all_ids if only is None or sid in only]
+    for index, sample_id in enumerate(target_ids, 1):
         payload = sample_payload(sample_id)
         # .js loaded via <script> so the page also works opened from file://
         (per_sample_dir / f"{sample_id}.js").write_text(
@@ -344,8 +360,8 @@ def main() -> None:
             + json.dumps(sample_id) + "]="
             + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ";",
             encoding="utf-8")
-        if index % 10 == 0:
-            print(f"sample payload {index}/{len(all_ids)}")
+        if index % 10 == 0 or index == len(target_ids):
+            print(f"sample payload {index}/{len(target_ids)}")
 
     micro = boundary["micro_by_word_boundary"]
     completed = sum(1 for row in summary_rows.values() if row.get("processing_status") == "completed")
@@ -395,6 +411,7 @@ def main() -> None:
         "provenance": {
             "full100_feature_extraction": experiment.get("full_100_sample_feature_extraction", "RUN"),
             "labels_role": "官方标签仅作数据集元信息展示，不进入模型与路由",
+            "label_correction": "人工核验 -aqamKhZ1Ec__0: UNRESOLVED→MATCHED（2026-09-26 更正）；质量指标按更正后口径重算（recall 91.1%、保守拦截 7），round5 冻结件保留为历史记录",
             "sources": [
                 "outputs/q1_v2_full100/feature_summary.csv",
                 "outputs/q1_v2_full100/samples/*",
@@ -421,4 +438,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import sys
+    if "--only" in sys.argv:
+        position = sys.argv.index("--only")
+        ONLY_IDS = tuple(sys.argv[position + 1:])
     main()

@@ -416,3 +416,48 @@ def test_select_smoke_ids_includes_non_english(tmp_path):
     assert len(selected) == len(set(selected)) == 10
     assert selected[8] == "ne__0"
     assert selected[9] in {"ok__0", "ok__1"}
+
+
+def test_partial_review_number_normalization():
+    from q1_v2.partial_review import normalize_words
+    units = normalize_words(["twelve", "hundred", "square", "feet", "2008"])
+    assert [u.text for u in units] == ["1200", "square", "feet", "2008"]
+    assert units[0].word_indices == (0, 1)
+
+
+def test_partial_review_blockwise_pure_insertion():
+    from q1_v2.partial_review import review_partial_match
+    from q1_v2.data_loader import OriginalWord
+    words = [OriginalWord(i, t, 0, 0) for i, t in
+             enumerate(["in", "kenya", "following", "election"])]
+    asr = ([{"word": "in", "start_s": "0.1", "end_s": "0.3"},
+            {"word": "kenya", "start_s": "0.3", "end_s": "0.6"},
+            {"word": "and", "start_s": "0.7", "end_s": "0.8"},
+            {"word": "even", "start_s": "0.8", "end_s": "0.9"},
+            {"word": "following", "start_s": "1.0", "end_s": "1.2"},
+            {"word": "election", "start_s": "1.3", "end_s": "1.6"}])
+    out = review_partial_match(sample_id="x__0", official_text="in kenya following election",
+                               original_words=words, asr_rows=asr,
+                               stage1_ambiguous=False,
+                               thresholds={"match_recall_min": 0.8, "match_precision_min": 0.75,
+                                           "match_edit_similarity_min": 0.7, "min_exact_tokens": 3})
+    assert out["decision"]["passed"] is True
+    assert out["decision"]["policy"] == "REVIEWED_BLOCKWISE_MFA"
+    assert out["gaps"][0]["pure_inserted_speech"] is True
+    assert out["segments"][1]["official_text"] == "following election"
+
+
+def test_partial_review_missing_text_stays_blocked():
+    from q1_v2.partial_review import review_partial_match
+    from q1_v2.data_loader import OriginalWord
+    words = [OriginalWord(i, t, 0, 0) for i, t in
+             enumerate(["look", "at", "the", "record", "today", "please"])]
+    asr = [{"word": w, "start_s": str(i * 0.2), "end_s": str(i * 0.2 + 0.2)}
+           for i, w in enumerate(["look", "at", "the", "record"])]
+    out = review_partial_match(sample_id="x__1", official_text="look at the record today please",
+                               original_words=words, asr_rows=asr,
+                               stage1_ambiguous=False,
+                               thresholds={"match_recall_min": 0.8, "match_precision_min": 0.75,
+                                           "match_edit_similarity_min": 0.7, "min_exact_tokens": 3})
+    assert out["decision"]["passed"] is False
+    assert out["decision"]["policy"] is None

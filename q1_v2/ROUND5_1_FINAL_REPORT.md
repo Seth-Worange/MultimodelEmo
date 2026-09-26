@@ -175,7 +175,48 @@ schema + `experiment_config.json`）。**100/100 全部 completed，0 失败、0
 |---|---|---|
 | NEW_LOCAL_MFA | 68 | 本轮现场真实 MFA 局部对齐 |
 | REUSED_VERIFIED_REAL_MFA | 4 | 复用 round4 已验证真实 MFA（SHA 校验通过） |
-| PROHIBITED_BY_ROUTER | 28 | REVIEW_REQUIRED 9 + INVALID_CORRESPONDENCE 19，保守拦截、零伪造对齐 |
+| REVIEWED_NORMALIZED_MFA | 3 | PARTIAL_MATCH 复核层·归一化路径晋级（见 §8.1） |
+| REVIEWED_BLOCKWISE_MFA | 1 | PARTIAL_MATCH 复核层·块链分段路径晋级（见 §8.1） |
+| PROHIBITED_BY_ROUTER | 24 | 保守拦截、零伪造对齐（INVALID 19 + 未过复核的 PARTIAL 4 + UNRESOLVED 1） |
+
+### 8.1 PARTIAL_MATCH 复核层（2026-09-26 增补）
+
+**动机**：8 条 stage-1 PARTIAL_MATCH 中多数经人工听辨实为可对应，卡点是转写风格差异
+（数字写法、口语修正、插入式额外讲话）。为不动"mismatch 完美剔除"的既有安全性，
+复核层**只作用于 PARTIAL_MATCH 样本**，不改写 stage-1 判定字段，不新增阈值。
+
+**两个组件**（`q1_v2/partial_review.py`）：
+1. **归一化口径统一**（仅数字词↔数字，含 hundred/thousand 组合）后重算
+   recall/precision/edit_sim，沿用原阈值（≥0.80/0.75/0.70，精确词≥3，无歧义）；
+2. **多块链 + 间隙标注**：锚点链在"观察侧出现官方文本外的词"处断开，间隙词显式标注；
+   通过条件 = ≥2 块 + 官方文本全覆盖且连续 + 间隙词全部为插入式额外讲话（纯插入），
+   块内虚词由 MFA 插位（与现行区间内做法一致），间隙词不进文本。
+
+**8 条判定与结果**（证据留存 `review_evidence.json`，旧产物归档 `pre_review_archive/`）：
+
+| 样本 | 归一化后指标 | 块链结构 | 判定 | 对齐结果 |
+|---|---|---|---|---|
+| `-tPCytz4rww__11` | 0.812/0.929/0.812 ✓ | — | REVIEWED_NORMALIZED_MFA | 17/17 词 |
+| `-mqbVkbCndg__0` | 1.000/1.000/1.000 ✓ | — | REVIEWED_NORMALIZED_MFA | 10/12 词 |
+| `-tPCytz4rww__10` | 0.917/1.000/0.917 ✓ | — | REVIEWED_NORMALIZED_MFA | 12/12 词 |
+| `-aqamKhZ1Ec__0` | 0.714（不达标） | 2 块 + 间隙 `and even as the` 纯插入 ✓ | REVIEWED_BLOCKWISE_MFA | 13/14 词（`2008,` 数字不在发音词典，掩码 0 不伪造） |
+| `-3g5yACwYnA__9` | 0.957 ✓ 但区间歧义 | — | 维持拦截 | 0/21 |
+| `-HwX2H8Z4hY__2` | 0.571 | 单块（真·部分对应） | **维持拦截** | 0/8 |
+| `-AUZQgSxyPQ__2` | 0.634 | 7 块但间隙含音变词 | 维持拦截 | 0/41 |
+| `-s9qJ7ATP7w__6` | 0.600 | 间隙 `keep`↔`kept` 词形差（超出约定口径） | 维持拦截 | 0/5 |
+
+判别力核对：人工判定为真·部分对应的 `-HwX2H8Z4hY__2` 被规则正确留拦截；
+`-aqamKhZ1Ec__0`（人工更正后为 MATCHED）经分段对齐获得两段真实时间戳，
+间隙语音零污染。评估口径说明：本复核层的动机与案例来自同一批 100 条，
+上述为**同集回测**结果，非独立验证。
+
+### 8.2 人工核验口径更正（2026-09-26）
+
+人工核验文件中 `-aqamKhZ1Ec__0` 由 UNRESOLVED 更正为 MATCHED（数据方更正）。
+按更正后口径重算的评估指标写入 `outputs/q1_v2_full100/manual_qa/`
+（MATCHED 79 / PARTIAL 1 / NO_SPEECH 4 / MISMATCH 13 / NON_ENGLISH 3；
+precision 100%、recall 91.1%、F1 95.4%、保守拦截 7、危险假阳性 0）；
+round5 冻结件 `outputs/q1_v2_round5/manual_qa/` 保留为历史记录。展示页数据与页脚注记同步。
 
 质量路由分布：HIGH_CONFIDENCE_MATCH 72 / REVIEW_REQUIRED 9 / INVALID_CORRESPONDENCE 19；
 词级对齐合计 1474 词，特征包合计约 30.8 MB（`allow_pickle=False` 全部可重读）。

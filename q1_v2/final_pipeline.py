@@ -103,6 +103,41 @@ def _align(
     target: Path, config: Q1Config, *, dictionary: Path, mfa_work_dir: Path,
 ) -> tuple[list[WordAlignment], str, bool]:
     if qa["route"] != "HIGH_CONFIDENCE_MATCH":
+        if qa.get("correspondence_status") == "PARTIAL_MATCH":
+            # Second-stage review (scope frozen): stage-1 verdict fields stay
+            # unchanged; only PARTIAL_MATCH evidence is re-examined.
+            from .partial_review import execute_reviewed_alignment, review_partial_match
+            asr_path = target / "asr_words.csv"
+            match_path = target / "local_match.json"
+            if not asr_path.is_file():
+                asr_path = qa_source / "asr_words.csv"
+            if not match_path.is_file():
+                match_path = qa_source / "local_match.json"
+            asr_rows = list(csv.DictReader(asr_path.open("r", encoding="utf-8-sig", newline="")))
+            stage1_match = read_json(match_path)
+            review = review_partial_match(
+                sample_id=record.sample_id, official_text=record.text,
+                original_words=record.original_words, asr_rows=asr_rows,
+                stage1_ambiguous=bool(stage1_match.get("local_match_ambiguous")),
+                thresholds={"match_recall_min": 0.80, "match_precision_min": 0.75,
+                            "match_edit_similarity_min": 0.70, "min_exact_tokens": 3},
+            )
+            write_json(target / "review_evidence.json", review)
+            if review["decision"]["passed"]:
+                words, policy = execute_reviewed_alignment(
+                    record=record, media=media, target=target, config=config,
+                    dictionary=dictionary, mfa_work_dir=mfa_work_dir,
+                    review=review, qa=qa)
+                write_csv(target / "word_alignment.csv",
+                          (asdict(word) for word in words), ALIGNMENT_FIELDS)
+                write_json(target / "alignment_metadata.json", {
+                    "source": "reviewed_partial_match_mfa", "mfa_policy": policy,
+                    "review_reason": review["decision"]["reason"],
+                    "original_word_count": record.word_count,
+                    "aligned_word_count": sum(bool(word.alignment_mask) for word in words),
+                    "numerical_algorithm_changed_from_round4": False,
+                })
+                return words, policy, True
         words = unavailable_alignment(record, "correspondence_not_high_confidence")
         write_csv(target / "word_alignment.csv", (asdict(word) for word in words), ALIGNMENT_FIELDS)
         write_json(target / "alignment_metadata.json", {
@@ -414,15 +449,30 @@ def process_one(
         return failure
 
 
+def read_csv_rows(path: Path) -> list[dict[str, Any]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
 def write_smoke_summary(output_root: Path, selected: Sequence[str], *, details_dir: str = "smoke_test_details",
                         summary_name: str = "smoke_test_summary.csv",
-                        full100_status: str = "NOT_RUN") -> dict[str, Any]:
-    rows = []
-    for sample_id in selected:
+                        full100_status: str = "NOT_RUN",
+                        merge_existing: bool = False) -> dict[str, Any]:
+    def row_for(sample_id: str) -> dict[str, Any]:
         target = output_root / details_dir / sample_id
         success, failed = target / "_SUCCESS.json", target / "_FAILED.json"
-        rows.append(read_json(success if success.is_file() else failed) if success.is_file() or failed.is_file()
-                    else {"sample_id": sample_id, "processing_status": "not_run"})
+        return read_json(success if success.is_file() else failed) if success.is_file() or failed.is_file() \
+            else {"sample_id": sample_id, "processing_status": "not_run"}
+
+    new_rows = {sample_id: row_for(sample_id) for sample_id in selected}
+    if merge_existing and (output_root / summary_name).is_file():
+        existing = read_csv_rows(output_root / summary_name)
+        order = [row["sample_id"] for row in existing]
+        merged = [new_rows.get(row["sample_id"], row) for row in existing]
+        merged.extend(new_rows[sample_id] for sample_id in selected if sample_id not in order)
+        rows = merged
+    else:
+        rows = [new_rows[sample_id] for sample_id in selected]
     write_csv(output_root / summary_name, rows, SUMMARY_FIELDS)
     grades = Counter()
     for row in rows:
@@ -430,7 +480,7 @@ def write_smoke_summary(output_root: Path, selected: Sequence[str], *, details_d
         if path.is_file():
             grades.update(read_json(path)["counts"])
     summary = {
-        "selected_count": len(selected), "completed_count": sum(row.get("processing_status") == "completed" for row in rows),
+        "selected_count": len(rows), "completed_count": sum(row.get("processing_status") == "completed" for row in rows),
         "completed_with_mfa_failure_count": sum(row.get("processing_status") == "completed_with_mfa_failure" for row in rows),
         "failed_count": sum(row.get("processing_status") == "failed" for row in rows),
         "confidence_counts": dict(grades),
@@ -459,6 +509,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     group.add_argument("--smoke10", action="store_true")
     group.add_argument("--all", action="store_true",
                        help="Extract all 100 official samples (authorized full run; details under samples/)")
+    parser.add_argument("--details-dir-name", default=None,
+                        help="Override per-sample directory name (default: samples for --all)")
+    parser.add_argument("--summary-name", default=None,
+                        help="Override summary CSV name (default: feature_summary.csv for --all)")
+    parser.add_argument("--merge-summary", action="store_true",
+                        help="Merge selected rows into an existing summary instead of rewriting it")
     args = parser.parse_args(argv)
     if not all(path.is_file() for path in (args.mfa_dictionary, args.mfa_executable,
                                            args.openface_executable, args.face_model)):
@@ -484,6 +540,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         selected = select_smoke_ids(args.qa_root, args.round5_qa_root) if args.smoke10 else args.sample_id
         details_dir, summary_name = "smoke_test_details", "smoke_test_summary.csv"
+    if args.details_dir_name:
+        details_dir = args.details_dir_name
+    if args.summary_name:
+        summary_name = args.summary_name
     if not args.all and (len(selected) > 10 or len(set(selected)) != len(selected)
                          or any(item not in by_id for item in selected)):
         parser.error("At most 10 unique official sample IDs allowed; use --all for the authorized full run")
@@ -512,14 +572,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print({"progress": f"{index}/{len(selected)}", **result}, flush=True)
         write_smoke_summary(args.output_dir, selected, details_dir=details_dir,
                             summary_name=summary_name,
-                            full100_status="RUN" if args.all else "NOT_RUN")
+                            full100_status="RUN" if args.all else "NOT_RUN",
+                            merge_existing=args.merge_summary)
         if result.get("processing_status") == "failed":
             # Isolated failure: continue only on an explicitly selected batch.
             if not (args.smoke10 or args.all):
                 break
     final = write_smoke_summary(args.output_dir, selected, details_dir=details_dir,
                                 summary_name=summary_name,
-                                full100_status="RUN" if args.all else "NOT_RUN")
+                                full100_status="RUN" if args.all else "NOT_RUN",
+                                merge_existing=args.merge_summary)
     print(final, flush=True)
     return int(final["failed_count"] > 0 or final["completed_with_mfa_failure_count"] > 0)
 
