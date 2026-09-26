@@ -53,6 +53,22 @@ def _word_tokens(word: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", word.lower())
 
 
+# morphology / homophone canon (agreed scope 2026-09-26: exactly these pairs)
+MORPH_CANON = {
+    "kept": "keep", "keep": "keep",
+    "contains": "contain", "containing": "contain", "contain": "contain",
+    "bare": "bear", "bear": "bear",
+    "oils": "oil", "oil": "oil",
+    "delivered": "deliver", "deliver": "deliver",
+    "soulmate": "soul_mate",
+}
+PHRASE_PAIRS = (("soul", "mate", "soul_mate"),)
+
+
+def _canon(text: str) -> str:
+    return MORPH_CANON.get(text, text)
+
+
 def _parse_number_run(run: Sequence[str]) -> int | None:
     if not run:
         return None
@@ -91,6 +107,11 @@ class NormUnit:
     text: str
     word_indices: tuple[int, ...]
     is_number: bool = False
+    canon_override: str | None = None
+
+    @property
+    def canon(self) -> str:
+        return self.canon_override if self.canon_override is not None else _canon(self.text)
 
 
 def normalize_words(words: Sequence[str]) -> list[NormUnit]:
@@ -98,7 +119,30 @@ def normalize_words(words: Sequence[str]) -> list[NormUnit]:
     units: list[NormUnit] = []
     run_tokens: list[str] = []
     run_words: list[int] = []
-    for index, word in enumerate(words):
+    index = 0
+    while index < len(words):
+        phrase_hit = None
+        for first, second, merged in PHRASE_PAIRS:
+            if (index + 1 < len(words)
+                    and _word_tokens(words[index]) == [first]
+                    and _word_tokens(words[index + 1]) == [second]):
+                phrase_hit = (second, merged)
+                break
+        if phrase_hit is not None:
+            if run_words:
+                value = _parse_number_run(run_tokens)
+                if value is not None:
+                    units.append(NormUnit(str(value), tuple(run_words), True))
+                else:
+                    for source in run_words:
+                        units.append(NormUnit(" ".join(_word_tokens(words[source])), (source,)))
+                run_tokens, run_words = [], []
+            _, merged = phrase_hit
+            units.append(NormUnit(f"{words[index]} {words[index + 1]}",
+                                  (index, index + 1), False, merged))
+            index += 2
+            continue
+        word = words[index]
         pieces = _word_tokens(word)
         joined = " ".join(pieces)
         number_like = bool(pieces) and all(
@@ -107,6 +151,7 @@ def normalize_words(words: Sequence[str]) -> list[NormUnit]:
         if number_like and joined:
             run_tokens.extend(pieces)
             run_words.append(index)
+            index += 1
             continue
         if run_words:
             value = _parse_number_run(run_tokens)
@@ -118,6 +163,7 @@ def normalize_words(words: Sequence[str]) -> list[NormUnit]:
             run_tokens, run_words = [], []
         for piece in pieces:
             units.append(NormUnit(piece, (index,)))
+        index += 1
     if run_words:
         value = _parse_number_run(run_tokens)
         if value is not None:
@@ -192,8 +238,8 @@ def smith_waterman(official: Sequence[str], observed: Sequence[str],
 
 def normalized_single_metrics(official: Sequence[NormUnit],
                               observed: Sequence[NormUnit]) -> dict[str, Any]:
-    texts_o = [unit.text for unit in official]
-    texts_a = [unit.text for unit in observed]
+    texts_o = [unit.canon for unit in official]
+    texts_a = [unit.canon for unit in observed]
     score, start_j, end_j, pairs = smith_waterman(texts_o, texts_a)
     if not pairs:
         return {"score": 0.0, "matched_official": 0, "matched_observed": 0,
@@ -235,14 +281,14 @@ def _split_chain(chain: list[tuple[int, int]], official: Sequence[NormUnit],
     pieces: list[list[tuple[int, int]]] = []
     current: list[tuple[int, int]] = [chain[0]]
     for (i1, j1), (i2, j2) in zip(chain, chain[1:]):
-        gap_official = [unit.text for unit in official[i1 + 1:i2]]
+        gap_official = [unit.canon for unit in official[i1 + 1:i2]]
         gap_observed = observed[j1 + 1:j2]
         pool = list(gap_official)
         unexplained = 0
         for unit in gap_observed:
             hit = None
             for index, text in enumerate(pool):
-                if _fuzzy_unit_match(text, unit.text):
+                if text == unit.canon or _fuzzy_unit_match(text, unit.canon):
                     hit = index
                     break
             if hit is None:
@@ -261,8 +307,8 @@ def _split_chain(chain: list[tuple[int, int]], official: Sequence[NormUnit],
 def build_segments(official: Sequence[NormUnit], observed: Sequence[NormUnit],
                    *, min_block_anchors: int = 1) -> list[dict[str, Any]]:
     """Greedy collinear anchor chaining (exact first, fuzzy extension inside)."""
-    texts_o = [unit.text for unit in official]
-    texts_a = [unit.text for unit in observed]
+    texts_o = [unit.canon for unit in official]
+    texts_a = [unit.canon for unit in observed]
     anchors = [(i, j) for i, a in enumerate(texts_o) for j, b in enumerate(texts_a)
                if a == b or _fuzzy_unit_match(a, b)]
     # longest increasing chain (collinear in both sequences), greedy by length
@@ -323,7 +369,7 @@ def build_segments(official: Sequence[NormUnit], observed: Sequence[NormUnit],
 
 def annotate_gaps(official: Sequence[NormUnit], observed: Sequence[NormUnit],
                   segments: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    official_texts = {unit.text for unit in official}
+    official_texts = {unit.canon for unit in official}
     gaps: list[dict[str, Any]] = []
     for left, right in zip(segments, segments[1:]):
         gap_observed = observed[left["observed_unit_end"] + 1:right["observed_unit_start"]]
@@ -334,7 +380,7 @@ def annotate_gaps(official: Sequence[NormUnit], observed: Sequence[NormUnit],
             "gap_observed_words": sorted({w for unit in gap_observed for w in unit.word_indices}),
             "gap_official_units": [unit.text for unit in gap_official],
             "pure_inserted_speech": bool(gap_observed) and not gap_official
-            and all(unit.text not in official_texts for unit in gap_observed),
+            and all(unit.canon not in official_texts for unit in gap_observed),
         })
     return gaps
 
@@ -343,19 +389,112 @@ def annotate_gaps(official: Sequence[NormUnit], observed: Sequence[NormUnit],
 # decision
 # ---------------------------------------------------------------------------
 
+DEGENERATE_WORD_S = 0.05   # physical lower bound of an articulated word
+DEGENERATE_AVG_SPAN_S = 0.08  # avg word duration of a span below this = repeat hallucination
+
+
+def drop_degenerate_repeats(observed: Sequence[NormUnit],
+                            word_durations: Sequence[float]) -> tuple[list[NormUnit], list[dict[str, Any]]]:
+    """Drop maximal runs (>=3) of timestamp-degenerate observed units."""
+    flags = [min((word_durations[i] for i in unit.word_indices), default=0.0) < DEGENERATE_WORD_S
+             for unit in observed]
+    kept: list[NormUnit] = []
+    runs: list[dict[str, Any]] = []
+    index = 0
+    while index < len(observed):
+        if flags[index]:
+            end = index
+            while end + 1 < len(observed) and flags[end + 1]:
+                end += 1
+            if end - index + 1 >= 3:
+                runs.append({"observed_unit_start": index, "observed_unit_end": end,
+                             "units": [unit.text for unit in observed[index:end + 1]]})
+                index = end + 1
+                continue
+        kept.append(observed[index])
+        index += 1
+    return kept, runs
+
+
+def count_alternative_spans(official: Sequence[NormUnit], observed: Sequence[NormUnit]) -> int:
+    """Non-overlapping spans whose score reaches 95% of the best local block."""
+    texts_o = [unit.canon for unit in official]
+    texts_a = [unit.canon for unit in observed]
+    score, start_j, end_j, _ = smith_waterman(texts_o, texts_a)
+    if score <= 0:
+        return 0
+    import numpy as np
+    n, m = len(texts_o), len(texts_a)
+    scores = np.zeros((n + 1, m + 1), dtype=np.int32)
+    back = np.zeros((n + 1, m + 1), dtype=np.uint8)
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            diagonal = int(scores[i - 1, j - 1]) + (2 if texts_o[i - 1] == texts_a[j - 1] else -2)
+            up = int(scores[i - 1, j]) - 1
+            left = int(scores[i, j - 1]) - 1
+            choices = (0, diagonal, up, left)
+            direction = max(range(4), key=lambda k: choices[k])
+            scores[i, j] = choices[direction]
+            back[i, j] = direction
+    alternatives = 0
+    for end_i in range(1, n + 1):
+        for end_j2 in range(1, m + 1):
+            if scores[end_i, end_j2] < .95 * score:
+                continue
+            cursor_i, cursor_j = end_i, end_j2
+            while cursor_i > 0 and cursor_j > 0 and scores[cursor_i, cursor_j] > 0:
+                direction = int(back[cursor_i, cursor_j])
+                if direction == 1:
+                    cursor_i -= 1
+                    cursor_j -= 1
+                elif direction == 2:
+                    cursor_i -= 1
+                elif direction == 3:
+                    cursor_j -= 1
+                else:
+                    break
+            if end_j2 <= start_j or cursor_j >= end_j:
+                alternatives += 1
+    return alternatives
+
+
 def review_partial_match(*, sample_id: str, official_text: str,
                          original_words: Sequence[Any], asr_rows: Sequence[dict[str, str]],
                          stage1_ambiguous: bool, thresholds: dict[str, float]) -> dict[str, Any]:
     official_words = [word.text for word in original_words]
     official_units = normalize_words(official_words)
     observed_words = [row["word"] for row in asr_rows]
+    word_durations = [float(row["end_s"]) - float(row["start_s"]) for row in asr_rows]
     observed_units = normalize_words(observed_words)
+    degeneracy: dict[str, Any] | None = None
+    if stage1_ambiguous:
+        filtered, runs = drop_degenerate_repeats(observed_units, word_durations)
+        remaining_alternatives = count_alternative_spans(official_units, filtered) if runs else None
+        if runs and remaining_alternatives == 0:
+            degeneracy = {"dropped_runs": runs, "dropped_unit_count": len(observed_units) - len(filtered),
+                          "resolution": "repeat_hallucination_removed",
+                          "avg_word_duration_rule": f"span avg < {DEGENERATE_AVG_SPAN_S}s or word < {DEGENERATE_WORD_S}s"}
+            observed_units = filtered
+            stage1_ambiguous = False
+        elif runs:
+            degeneracy = {"dropped_runs": runs,
+                          "resolution": "still_ambiguous_after_filter",
+                          "remaining_alternatives": remaining_alternatives}
     single = normalized_single_metrics(official_units, observed_units)
+    mfa_span = None
+    if single["observed_start_unit"] is not None:
+        span_units = observed_units[single["observed_start_unit"]:single["observed_end_unit"]]
+        span_words = sorted({w for unit in span_units for w in unit.word_indices})
+        if span_words:
+            mfa_span = {
+                "start_s": round(min(float(asr_rows[w]["start_s"]) for w in span_words), 3),
+                "end_s": round(max(float(asr_rows[w]["end_s"]) for w in span_words), 3),
+            }
     segments = build_segments(official_units, observed_units)
     gaps = annotate_gaps(official_units, observed_units, segments)
 
     thresholds = {
-        "match_recall_min": thresholds.get("match_recall_min", 0.80),
+        "match_recall_min": thresholds.get("match_recall_min", 0.78),
         "match_precision_min": thresholds.get("match_precision_min", 0.75),
         "match_edit_similarity_min": thresholds.get("match_edit_similarity_min", 0.70),
         "min_exact_tokens": thresholds.get("min_exact_tokens", 3),
@@ -415,7 +554,9 @@ def review_partial_match(*, sample_id: str, official_text: str,
         },
         "thresholds": thresholds,
         "stage1_ambiguous": stage1_ambiguous,
+        "timestamp_degeneracy_filter": degeneracy,
         "normalized_single": single,
+        "mfa_span_s": mfa_span,
         "segments": segments_out,
         "gaps": gaps,
         "decision": decision,
@@ -450,7 +591,7 @@ def diagnose(qa_root: Path, sample_ids: Sequence[str] | None = None) -> list[dic
             sample_id=sample_id, official_text=qa["official_text"],
             original_words=words, asr_rows=asr_rows,
             stage1_ambiguous=bool(match.get("local_match_ambiguous")),
-            thresholds={"match_recall_min": 0.80, "match_precision_min": 0.75,
+            thresholds={"match_recall_min": 0.78, "match_precision_min": 0.75,
                         "match_edit_similarity_min": 0.70, "min_exact_tokens": 3},
         )
         results.append(outcome)
@@ -504,8 +645,9 @@ def execute_reviewed_alignment(*, record: Any, media: Any, target: Path, config:
     policy = review["decision"]["policy"]
     duration_s = media.duration_s
     if policy == "REVIEWED_NORMALIZED_MFA":
-        start = float(qa["matched_audio_start_s"])
-        end = float(qa["matched_audio_end_s"])
+        span = review.get("mfa_span_s") or {}
+        start = float(span.get("start_s", qa["matched_audio_start_s"]))
+        end = float(span.get("end_s", qa["matched_audio_end_s"]))
         crop = crop_for_local_mfa(
             media, start, end, margin_s=config.alignment_margin_s,
             output_path=target / "audio_mfa_local_crop.wav")

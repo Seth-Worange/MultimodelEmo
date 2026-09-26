@@ -119,7 +119,10 @@ def _align(
                 sample_id=record.sample_id, official_text=record.text,
                 original_words=record.original_words, asr_rows=asr_rows,
                 stage1_ambiguous=bool(stage1_match.get("local_match_ambiguous")),
-                thresholds={"match_recall_min": 0.80, "match_precision_min": 0.75,
+                # review-layer recall floor 0.78 (agreed 2026-09-26): only
+                # PARTIAL_MATCH enters this layer, so stage-1 mismatch
+                # rejection is unaffected by the softer floor
+                thresholds={"match_recall_min": 0.78, "match_precision_min": 0.75,
                             "match_edit_similarity_min": 0.70, "min_exact_tokens": 3},
             )
             write_json(target / "review_evidence.json", review)

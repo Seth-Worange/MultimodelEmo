@@ -175,9 +175,9 @@ schema + `experiment_config.json`）。**100/100 全部 completed，0 失败、0
 |---|---|---|
 | NEW_LOCAL_MFA | 68 | 本轮现场真实 MFA 局部对齐 |
 | REUSED_VERIFIED_REAL_MFA | 4 | 复用 round4 已验证真实 MFA（SHA 校验通过） |
-| REVIEWED_NORMALIZED_MFA | 3 | PARTIAL_MATCH 复核层·归一化路径晋级（见 §8.1） |
+| REVIEWED_NORMALIZED_MFA | 6 | PARTIAL_MATCH 复核层·归一化/消歧路径晋级（见 §8.1） |
 | REVIEWED_BLOCKWISE_MFA | 1 | PARTIAL_MATCH 复核层·块链分段路径晋级（见 §8.1） |
-| PROHIBITED_BY_ROUTER | 24 | 保守拦截、零伪造对齐（INVALID 19 + 未过复核的 PARTIAL 4 + UNRESOLVED 1） |
+| PROHIBITED_BY_ROUTER | 21 | 保守拦截、零伪造对齐（INVALID 19 + 真 PARTIAL 1 + UNRESOLVED 1） |
 
 ### 8.1 PARTIAL_MATCH 复核层（2026-09-26 增补）
 
@@ -185,30 +185,38 @@ schema + `experiment_config.json`）。**100/100 全部 completed，0 失败、0
 （数字写法、口语修正、插入式额外讲话）。为不动"mismatch 完美剔除"的既有安全性，
 复核层**只作用于 PARTIAL_MATCH 样本**，不改写 stage-1 判定字段，不新增阈值。
 
-**两个组件**（`q1_v2/partial_review.py`）：
-1. **归一化口径统一**（仅数字词↔数字，含 hundred/thousand 组合）后重算
-   recall/precision/edit_sim，沿用原阈值（≥0.80/0.75/0.70，精确词≥3，无歧义）；
+**三个组件**（`q1_v2/partial_review.py`；v2 口径 2026-09-26 定稿）：
+1. **归一化口径统一**：数字词↔数字（含 hundred/thousand 组合）＋词形/同音规范映射
+   （keep↔kept、containing↔contains、bear↔bare、oils↔oil、deliver↔delivered、
+   soul mate↔soulmate 短语合并），在规范形上重算 recall/precision/edit_sim；
 2. **多块链 + 间隙标注**：锚点链在"观察侧出现官方文本外的词"处断开，间隙词显式标注；
    通过条件 = ≥2 块 + 官方文本全覆盖且连续 + 间隙词全部为插入式额外讲话（纯插入），
-   块内虚词由 MFA 插位（与现行区间内做法一致），间隙词不进文本。
+   块内虚词由 MFA 插位（与现行区间内做法一致），间隙词不进文本；
+3. **时间戳退化消歧**：stage-1 区间歧义时，识别 ASR 复读幻觉（连续 ≥3 词时长 <0.05s
+   的退化段）并剔除，剔除后无剩余竞争区间即解除歧义；
+   **复核层 recall 地板 0.78**（其余阈值不变；安全性来自复核层只进 PARTIAL_MATCH 桶，
+   13 条 MISMATCH 不经过本层，完美剔除不受影响）。
 
 **8 条判定与结果**（证据留存 `review_evidence.json`，旧产物归档 `pre_review_archive/`）：
 
-| 样本 | 归一化后指标 | 块链结构 | 判定 | 对齐结果 |
+| 样本 | 规范形指标（recall/prec/edit） | 复核机制 | 判定 | 对齐结果 |
 |---|---|---|---|---|
-| `-tPCytz4rww__11` | 0.812/0.929/0.812 ✓ | — | REVIEWED_NORMALIZED_MFA | 17/17 词 |
-| `-mqbVkbCndg__0` | 1.000/1.000/1.000 ✓ | — | REVIEWED_NORMALIZED_MFA | 10/12 词 |
-| `-tPCytz4rww__10` | 0.917/1.000/0.917 ✓ | — | REVIEWED_NORMALIZED_MFA | 12/12 词 |
-| `-aqamKhZ1Ec__0` | 0.714（不达标） | 2 块 + 间隙 `and even as the` 纯插入 ✓ | REVIEWED_BLOCKWISE_MFA | 13/14 词（`2008,` 数字不在发音词典，掩码 0 不伪造） |
-| `-3g5yACwYnA__9` | 0.957 ✓ 但区间歧义 | — | 维持拦截 | 0/21 |
-| `-HwX2H8Z4hY__2` | 0.571 | 单块（真·部分对应） | **维持拦截** | 0/8 |
-| `-AUZQgSxyPQ__2` | 0.634 | 7 块但间隙含音变词 | 维持拦截 | 0/41 |
-| `-s9qJ7ATP7w__6` | 0.600 | 间隙 `keep`↔`kept` 词形差（超出约定口径） | 维持拦截 | 0/5 |
+| `-tPCytz4rww__11` | 0.812/0.929/0.812 ✓ | 数字归一化 | REVIEWED_NORMALIZED_MFA | 17/17 词 |
+| `-mqbVkbCndg__0` | 1.000/1.000/1.000 ✓ | 数字归一化 | REVIEWED_NORMALIZED_MFA | 10/12 词 |
+| `-tPCytz4rww__10` | 0.917/1.000/0.917 ✓ | 数字归一化 | REVIEWED_NORMALIZED_MFA | 12/12 词 |
+| `-3g5yACwYnA__9` | 0.957/0.957/0.957 ✓ | **时间戳退化消歧**（复读幻觉 3 段剔除后歧义解除） | REVIEWED_NORMALIZED_MFA | 19/21 词（裁剪 0.67~7.92s 覆盖完整发音） |
+| `-s9qJ7ATP7w__6` | 1.000/1.000/1.000 ✓ | 词形映射 keep↔kept | REVIEWED_NORMALIZED_MFA | 5/5 词 |
+| `-AUZQgSxyPQ__2` | 0.875/0.778/0.778 ✓ | 词形/同音全口径（soul mate 合并等 6 组） | REVIEWED_NORMALIZED_MFA | 36/41 词（品牌名 5 词无发音词典条目，掩码 0） |
+| `-aqamKhZ1Ec__0` | 0.714（单块不达标） | 块链：2 块 + 间隙 `and even as the` 纯插入 | REVIEWED_BLOCKWISE_MFA | 13/14 词（`2008,` 数字不在发音词典） |
+| `-HwX2H8Z4hY__2` | 0.571 | 单块（真·部分对应） | **维持拦截** | 0/8 词 |
 
 判别力核对：人工判定为真·部分对应的 `-HwX2H8Z4hY__2` 被规则正确留拦截；
-`-aqamKhZ1Ec__0`（人工更正后为 MATCHED）经分段对齐获得两段真实时间戳，
-间隙语音零污染。评估口径说明：本复核层的动机与案例来自同一批 100 条，
-上述为**同集回测**结果，非独立验证。
+其余 7 条（人工均为 MATCHED，含 UNRESOLVED→MATCHED 更正的 `-aqamKhZ1Ec__0`）
+全部获得真实时间戳，插入式额外讲话零污染。说明两点：①AUZQg 词形口径放宽后
+recall 实测 0.875，0.78 地板实际未起决定作用（按指令保留）；②AUZQg 未对齐的
+5 词为品牌名（Clarisonic/Spot/jojoba 等），MFA 发音词典无条目，按缺失策略置
+掩码 0 不伪造。评估口径说明：本复核层的动机与案例来自同一批 100 条，上述为
+**同集回测**结果，非独立验证。
 
 ### 8.2 人工核验口径更正（2026-09-26）
 
