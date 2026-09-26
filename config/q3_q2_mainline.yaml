@@ -1,0 +1,10 @@
+# 问题三单模型对照：直接复用用户选定的问题二主线。
+infer:
+  part: q3
+  checkpoint: [outputs/runs/q2_fuse_lowaux_s2026/best.pt]
+  neutral_zero: true
+  device: cuda
+  data_root: data
+  output_dir: outputs/predictions_q3_q2_mainline
+  alignment_file: outputs/runs/main/q3_alignment.json
+  max_samples: 0

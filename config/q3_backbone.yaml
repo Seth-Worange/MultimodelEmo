@@ -1,0 +1,48 @@
+# 问题三独立骨干：仅用附件2训练标签，完整输入验证选模。
+train:
+  data_root: data
+  device: cuda
+  architecture: q3_temporal
+  text_mode: bert
+  audio_dynamics: true
+  regression_mode: signed
+  normalize_inputs: true
+  pack_aligned_grus: true
+  transformer_layers: 1
+  transformer_heads: 4
+  epochs: 35
+  patience: 6
+  batch_size: 32
+  lr: 0.0003
+  dropout: 0.2
+  class_weight_power: 0.5
+  regression_loss: smooth_l1
+  magnitude_weight: 0.1
+  corruption_probability: 0.0
+  clean_supervision_weight: 1.0
+  selection_scope: clean
+  evaluation_protocol: sample_v2
+  evaluation_seed: 2026
+  seed: 2026
+  output_dir: outputs/q3_temporal_s2026
+
+evaluate:
+  checkpoint: [outputs/q3_temporal_s2026/best.pt]
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  seed: 2026
+  evaluation_protocol: sample_v2
+  neutral_zero: true
+  output: outputs/diagnostics/q3_temporal_s2026/validation.json
+
+infer:
+  part: q3
+  checkpoint: [outputs/q3_temporal_s2026/best.pt]
+  neutral_zero: true
+  device: cuda
+  data_root: data
+  output_dir: outputs/predictions_q3_temporal_s2026
+  alignment_file: outputs/runs/main/q3_alignment.json
+  max_samples: 0

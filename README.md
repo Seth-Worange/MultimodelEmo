@@ -165,11 +165,15 @@
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.align_q3 --config config\q3.yaml
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.infer --config config\q3.yaml
 & 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.refine_q3_evidence --config config\q3_evidence_refine_neutral.yaml
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.build_q3_cards
+& 'C:\Anaconda3\envs\pytorch\python.exe' -m scripts.serve_cards
 ```
 
 可用 `--max-samples 1` 先验证接口。
 
-问题2当前推荐结果位于 `outputs\predictions_q2_best`（旧门控结果仍在 `outputs\predictions_availability`），问题3默认结果位于 `outputs\predictions_q3_mixed_neutral`，旧门控双模型配置保留为 `config\q3_availability_legacy.yaml`。问题3使用三模态8个子集（含空模态基线）计算 Shapley 贡献，并逐模态遮蔽连续5位置窗口，输出预测分数变化；最终证据窗口同时检查删除和单窗口保留分数。附件4特征文件本身不含词时间戳；`align_q3.py` 逐位置核对重建的BERT词元与附件4中的词元，不匹配率不足时标记 `review_required`，不会输出未经核验的时间。人工核查后再用于答卷。`config\q3.yaml` 的 `alignment_file` 指向已生成的 `outputs\runs\main\q3_alignment.json`（20条全部 `mapped`、`token_match_fraction=1.0`）；若该文件缺失，`infer.py` 会直接报错而不是静默退化成位置级输出。
+问题2当前推荐结果位于 `outputs\predictions_q2_best`（旧门控结果仍在 `outputs\predictions_availability`），问题3默认结果位于 `outputs\predictions_q3_mixed_neutral`。问题3将已选预测器当作统一输入输出接口，按三模态8子集计算 signed Shapley，并另报绝对影响份额。证据先按删除必要性筛选，再以语义上下文条件增益复核；文本还比较重编码遮蔽和固定上下文特征遮蔽。报告同时间事件的三模态删除影响、多检查点稳定性、同模态随机窗口经验排名与输出头随机化对照。随机窗口少于19个时无法达到本流程0.05经验门槛，窗口仅保留为待核候选，网页默认不高亮。经验排名受候选筛选与窗口相关性影响，不应解释为独立标注下的解释正确率或严格显著性检验。`serve_cards` 会自动打开浏览器；已有结果更新后可加 `--rebuild` 重建页面。
+
+附件4特征文件没有时间戳，词位时间由 `align_q3.py` 从视频强制对齐并核对。07、18号等长转写的未覆盖词位仍标记为部分映射，不补造时间。若 `alignment_file` 缺失，推理与精炼会报错。
 
 新增脚本 `scripts\figures_q1.py` 生成问题1的典型样本对齐图与覆盖率汇总表，见下节。
 

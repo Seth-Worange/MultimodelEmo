@@ -25,12 +25,27 @@ from utils.text import (DEFAULT_BERT, DEFAULT_BERT_REVISION, encode_text, load_t
 from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel, build_fuse_regularization
 from model.complementary_net import ComplementaryAffectiveModel
+from model.q3_temporal import Q3TemporalModel
+from model.q3_residual import Q3ResidualModel
 
-ARCHITECTURES = ("baseline", "fuse", "complementary")
+ARCHITECTURES = ("baseline", "fuse", "complementary", "q3_temporal", "q3_residual")
 
 
 def build_model(args) -> torch.nn.Module:
     """按配置构造情感模型；fuse 为 FUSE-Net 风格的三因子分解架构。"""
+    if args.architecture == "q3_residual":
+        if args.source_checkpoint is None:
+            raise ValueError("q3_residual requires --source-checkpoint")
+        source = torch.load(args.source_checkpoint, map_location="cpu", weights_only=True)
+        return Q3ResidualModel(source["model_config"], dropout=args.dropout,
+                               heads=args.transformer_heads)
+    if args.architecture == "q3_temporal":
+        return Q3TemporalModel(
+            text_mode=args.text_mode, audio_dynamics=args.audio_dynamics,
+            regression_mode=args.regression_mode, dropout=args.dropout,
+            transformer_layers=args.transformer_layers,
+            transformer_heads=args.transformer_heads, normalize_inputs=args.normalize_inputs,
+            pack_aligned_grus=args.pack_aligned_grus)
     if args.architecture == "complementary":
         return ComplementaryAffectiveModel(
             hidden_dim=64, dropout=args.dropout, audio_dynamics=args.audio_dynamics,
@@ -65,6 +80,10 @@ def build_model(args) -> torch.nn.Module:
 
 def model_config(args) -> dict:
     """保存到检查点、供 load_model 还原结构的配置。"""
+    if args.architecture == "q3_residual":
+        source = torch.load(args.source_checkpoint, map_location="cpu", weights_only=True)
+        return {"architecture": "q3_residual", "base_config": source["model_config"],
+                "dropout": args.dropout, "heads": args.transformer_heads}
     common = {"architecture": args.architecture, "text_mode": args.text_mode,
               "audio_dynamics": args.audio_dynamics, "regression_mode": args.regression_mode,
               "dropout": args.dropout, "encoder_type": args.encoder_type,
@@ -86,6 +105,11 @@ def model_config(args) -> dict:
         return {key: common[key] for key in (
             "text_mode", "audio_dynamics", "regression_mode", "dropout",
             "normalize_inputs", "pack_aligned_grus")} | {"architecture": "complementary"}
+    if args.architecture == "q3_temporal":
+        return {key: common[key] for key in (
+            "text_mode", "audio_dynamics", "regression_mode", "dropout",
+            "transformer_layers", "transformer_heads", "normalize_inputs",
+            "pack_aligned_grus")} | {"architecture": "q3_temporal"}
     return {**common, "fusion": args.fusion}
 
 
@@ -410,6 +434,8 @@ def main() -> None:
                         help="以 text_bert 或 raw_text token 微调 BERT；只用附件2训练标签更新权重")
     parser.add_argument("--init-checkpoint", type=Path, default=None,
                         help="从同结构的冻结BERT检查点初始化融合层，再微调BERT")
+    parser.add_argument("--source-checkpoint", type=Path, default=None,
+                        help="从同结构的已训练模型初始化，继续用当前任务数据训练")
     parser.add_argument("--bert-model-name", default=DEFAULT_BERT)
     parser.add_argument("--bert-model-revision", default=DEFAULT_BERT_REVISION)
     parser.add_argument("--bert-freeze-bottom-layers", type=int, default=8)
@@ -496,7 +522,10 @@ def main() -> None:
             or args.bert_max_length < 50 or args.gradient_accumulation_steps < 1
             or (args.bert_finetune and args.text_mode != "bert")
             or (args.init_checkpoint is not None and not args.bert_finetune)
-            or (args.text_polarity_head and not args.hierarchical_head)):
+            or (args.source_checkpoint is not None and args.init_checkpoint is not None)
+            or (args.text_polarity_head and not args.hierarchical_head)
+            or (args.architecture == "q3_temporal" and
+                (args.text_mode != "bert" or args.bert_finetune))):
         parser.error("epochs, batch-size, patience and lr must be positive; dropout in [0, 1); "
                      "whole/overlap probability in [0, 1]; interval ratios in (0, 1]; "
                      "local rate range must satisfy 0 <= min <= max <= 1; BERT settings must be valid")
@@ -531,6 +560,20 @@ def main() -> None:
     if args.init_checkpoint is not None:
         warm_start = initialize_from_frozen_checkpoint(model, args.init_checkpoint, model_config(args))
         print(f"warm-started fusion model from {warm_start['path']} (epoch={warm_start['epoch']})")
+    if args.source_checkpoint is not None:
+        checkpoint = torch.load(args.source_checkpoint, map_location="cpu", weights_only=True)
+        source_model = checkpoint.get("model_config", {})
+        if (source_model.get("architecture", "baseline") != args.architecture
+                and not (args.architecture == "q3_residual"
+                         and source_model.get("architecture") == "fuse")):
+            raise ValueError("source checkpoint architecture must match the target")
+        if args.architecture == "q3_residual":
+            model.base.load_state_dict(checkpoint["model"])
+        else:
+            model.load_state_dict(checkpoint["model"])
+        warm_start = {"path": str(args.source_checkpoint.resolve()),
+                      "epoch": checkpoint.get("epoch"), "mode": "q3_clean_adaptation"}
+        print(f"initialized Q3 backbone from {warm_start['path']}")
     drop = tuple(args.drop_modalities or ())
     if drop:
         print(f"permanently dropping modalities: {', '.join(drop)}")
@@ -619,17 +662,22 @@ def main() -> None:
                 with (torch.autocast(device_type="cuda", dtype=torch.float16)
                       if use_amp else contextlib.nullcontext()):
                     clean_out = model(*model_inputs(clean))
-                    masked_out = model(*model_inputs(masked))
-                    loss = (args.clean_supervision_weight * supervised_loss(
-                                clean_out, clean, class_weights, args.regression_loss,
-                                                   args.magnitude_weight)
-                            + (1 - args.clean_supervision_weight) * supervised_loss(
-                                masked_out, masked, class_weights, args.regression_loss,
-                                                   args.magnitude_weight)
-                            + 0.05 * consistency_loss(clean_out, masked_out))
+                    if args.architecture == "q3_temporal" and args.corruption_probability == 0:
+                        masked_out = clean_out
+                        loss = supervised_loss(clean_out, clean, class_weights,
+                                               args.regression_loss, args.magnitude_weight)
+                    else:
+                        masked_out = model(*model_inputs(masked))
+                        loss = (args.clean_supervision_weight * supervised_loss(
+                                    clean_out, clean, class_weights, args.regression_loss,
+                                                       args.magnitude_weight)
+                                + (1 - args.clean_supervision_weight) * supervised_loss(
+                                    masked_out, masked, class_weights, args.regression_loss,
+                                                       args.magnitude_weight)
+                                + 0.05 * consistency_loss(clean_out, masked_out))
                     if args.text_mode == "tokens":
                         loss += args.distill_weight * distillation_loss(clean_out, clean)
-                    if args.architecture == "fuse":
+                    if args.architecture == "fuse" and args.auxiliary_scale > 0:
                         reg = build_fuse_regularization(
                             model, masked_out, clean_out, masked["classes"], class_weights,
                             tau=args.tau, kl_beta=args.kl_beta, contrast_weight=args.contrast_weight,
@@ -729,6 +777,7 @@ def main() -> None:
     run["config"] = str(args.config) if args.config else None
     run["output_dir"] = str(args.output_dir)
     run["init_checkpoint"] = str(args.init_checkpoint) if args.init_checkpoint else None
+    run["source_checkpoint"] = str(args.source_checkpoint) if args.source_checkpoint else None
     run.update({"device_used": str(device), "torch_version": torch.__version__,
                 "cuda_version": torch.version.cuda, "best_epoch": best_epoch,
                 "selection_views": list(selection_views),

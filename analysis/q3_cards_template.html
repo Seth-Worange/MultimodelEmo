@@ -22,6 +22,8 @@
     .panel { background:var(--paper); border:1px solid var(--line); border-radius:16px; box-shadow:0 8px 30px #284e590a; overflow:hidden; }
     .side { position:sticky; top:16px; padding:18px 12px; }
     .side h2 { margin:0 8px 12px; font-size:13px; color:var(--muted); letter-spacing:.08em; }
+    .search { width:100%;margin:0 0 12px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;outline:none;background:#f8fbfb;color:var(--ink); }
+    .search:focus { border-color:#2c9b8c;box-shadow:0 0 0 3px #2c9b8c22; }
     .sample-list { max-height:calc(100vh - 210px); overflow:auto; display:grid; gap:4px; }
     .sample { width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px;
       text-align:left; color:#41606a; background:transparent; border:1px solid transparent; border-radius:10px;
@@ -44,6 +46,7 @@
     .video-actions { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin:10px 0 4px; }
     .btn { border:1px solid #c7dcdd; background:#fff; border-radius:9px; padding:6px 11px; color:#28535f; cursor:pointer; font-size:12px; }
     .btn:hover { background:#eaf6f3; }
+    .btn:disabled { opacity:.45;cursor:not-allowed; }
     .btn.strong { background:#0f8178; color:white; border-color:#0f8178; }
     .timebar { margin:4px 22px 16px; }
     .timebar-top { display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-bottom:6px; }
@@ -70,6 +73,14 @@
     .val { text-align:right;font-variant-numeric:tabular-nums; color:#385863; }
     .subhead { font-size:11px;color:var(--muted);margin:17px 0 7px;letter-spacing:.08em; }
     .raw { font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:#637d86;white-space:normal; }
+    .signed-row { display:grid;grid-template-columns:42px 1fr 48px 53px;gap:7px;align-items:center;margin:8px 0;font-size:12px; }
+    .signed-track { height:11px;background:linear-gradient(90deg,#f4e1dd 0 50%,#d9ede6 50%);border-radius:8px;position:relative; }
+    .signed-track::after { content:"";position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:#718b8e; }
+    .signed-fill { position:absolute;top:1px;bottom:1px;border-radius:7px; }
+    .signed-number { text-align:right;font-variant-numeric:tabular-nums; }
+    .signed-number.neg { color:#b65147; } .signed-number.pos { color:#188365; }
+    .mini-tag { display:inline-block;font-size:10px;border-radius:20px;padding:3px 8px;margin-right:5px;background:#e8f4f0;color:#16705e; }
+    .mini-tag.bad { background:#fff0e7;color:#ab5e37; }
     .evidence-quote { background:#fdf8ef;border-left:4px solid #e1a342;padding:12px 13px;border-radius:5px; font-size:15px;line-height:1.5; }
     .metric-pair { display:grid;grid-template-columns:1fr 1fr; gap:9px;margin-top:12px; }
     .metric { border:1px solid var(--line);border-radius:9px;padding:8px 10px; }
@@ -90,7 +101,7 @@
     <h1>多模态情感解释卡</h1><p class="subtitle">真实视频 · 预测类别 · 模态边际贡献 · 可回看词级证据</p></div>
     <span class="status">20 条无标签专项样本 · 模型解释，不代表真实情绪</span></header>
   <div class="layout">
-    <aside class="panel side"><h2>样本导航 <span id="sample-count"></span></h2><div id="sample-list" class="sample-list"></div></aside>
+    <aside class="panel side"><h2>样本导航 <span id="sample-count"></span></h2><input id="sample-search" class="search" type="search" placeholder="搜索编号或文本…"><div id="sample-list" class="sample-list"></div></aside>
     <main class="panel main">
       <div class="hero"><div class="hero-top"><div><div class="eyebrow">CASE STUDY <span id="case-id"></span></div><h2 id="case-title"></h2></div><span id="case-pill" class="pill"></span></div>
         <div id="hero-note" class="hero-note"></div></div>
@@ -104,13 +115,15 @@
     <aside class="rail">
       <section class="panel"><h3>预测与模态作用</h3><div class="outcome"><span id="prediction-label" class="pill"></span><span id="strength" class="strength"></span></div>
         <div class="subhead">三类预测概率</div><div id="probabilities"></div>
-        <div class="subhead">正 Shapley 贡献份额</div><div id="shares"></div>
+        <div class="subhead">Signed Shapley · 支持 / 反对当前预测</div><div id="signed-shares"></div>
+        <div class="subhead">绝对影响程度 |φ| / Σ|φ|</div><div id="shares"></div>
         <div id="raw-shapley" class="raw"></div>
-        <div class="fineprint">份额来自预测类别 margin 的八子集边际贡献。负贡献截为零后归一化；它不同于模型内部融合权重。</div>
+        <div class="fineprint">正号支持、负号反对当前预测类别的 margin；绝对份额表示影响大小，不等同于因果作用或模型内部融合权重。</div>
       </section>
-      <section class="panel"><h3>局部证据</h3><div id="quote" class="evidence-quote"></div><div class="metric-pair"><div class="metric"><small>删除后 margin 下降</small><b id="deletion"></b></div><div class="metric"><small>仅保留窗口 margin 增益</small><b id="insertion"></b></div></div>
-        <div id="window-note" class="fineprint"></div><div id="coverage-warning" class="warning" hidden></div>
-        <div class="fineprint">窗口从现有候选中按两项较小值筛选；时间来自强制对齐估计。点击视频回看可核查内容，不等于有标签的解释正确率。</div>
+      <section class="panel"><h3>统一时间事件 · 局部证据</h3><div id="evidence-status"></div><button id="toggle-candidates" class="btn" style="margin:8px 0">显示待核候选</button><div class="subhead">核心证据 E</div><div id="quote" class="evidence-quote"></div><div class="subhead">语义上下文 C</div><div id="context" class="fineprint"></div><div class="metric-pair"><div class="metric"><small>删除必要性 N(E)</small><b id="deletion"></b></div><div class="metric"><small>条件增益 G(E|C)</small><b id="conditional"></b></div></div>
+        <div class="subhead">同一时段的三模态删除影响</div><div id="event-modalities"></div>
+        <div id="window-note" class="fineprint"></div><div id="stability" class="fineprint"></div><div id="coverage-warning" class="warning" hidden></div>
+        <div class="fineprint">时间来自原视频强制对齐。未通过随机窗口及参数扰动检查的候选仅供审查，不作为确认的模型证据。</div>
       </section>
     </aside>
   </div>
@@ -127,7 +140,7 @@
   const colors = {text:'#1279a8',audio:'#c97339',vision:'#318f7d'};
   const numeric = (x,d=3) => Number(x).toFixed(d);
   const video = $('video');
-  let current = 0, stopAt = null, pendingSeek = null;
+  let current = 0, stopAt = null, pendingSeek = null, showCandidates = false;
 
   function applySeek(seconds,play) {
     try { video.currentTime = seconds; }
@@ -149,10 +162,25 @@
     bar.append(fill); const number=document.createElement('span'); number.className='val'; number.textContent=numeric(value);
     row.append(name,bar,number); return row;
   }
+  function signedRow(label,value,share) {
+    const row=document.createElement('div'); row.className='signed-row';
+    const name=document.createElement('span');name.textContent=label;
+    const track=document.createElement('span');track.className='signed-track';
+    const fill=document.createElement('i');fill.className='signed-fill';
+    const width=48*Math.max(0,Math.min(1,Number(share)));
+    fill.style.width=width+'%';fill.style.left=Number(value)<0?(50-width)+'%':'50%';
+    fill.style.background=Number(value)<0?'#bd5447':'#278c72';track.append(fill);
+    const amount=document.createElement('span');amount.className='signed-number '+(Number(value)<0?'neg':'pos');
+    amount.textContent=(Number(value)>0?'+':'')+numeric(value);
+    const proportion=document.createElement('span');proportion.className='val';proportion.textContent=numeric(100*Number(share),0)+'%';
+    row.append(name,track,amount,proportion);return row;
+  }
   function renderList() {
+    const query=$('sample-search').value.trim().toLowerCase();
     $('sample-count').textContent=records.length;
     $('sample-list').replaceChildren();
     records.forEach((record,index) => {
+      if(query && !(record.id+' '+(record.prediction.raw_text||'')).toLowerCase().includes(query))return;
       const button=document.createElement('button'); button.className='sample'+(index===current?' active':'');
       const left=document.createElement('span'); const dot=document.createElement('i'); dot.className='dot'; dot.style.background=colors[record.prediction.main_modality];
       left.append(dot,document.createTextNode(record.id));
@@ -160,13 +188,13 @@
       button.addEventListener('click',()=>render(index)); $('sample-list').append(button);
     });
   }
-  function renderWords(record) {
+  function renderWords(record,showEvidence) {
     const holder=$('words'); holder.replaceChildren();
     const start=Number(record.evidence.start_seconds), end=Number(record.evidence.end_seconds);
     const mappedEnd=Number(record.prediction.mapped_time_end);
     for (const word of record.alignment.words) {
       const chip=document.createElement('button'); chip.className='word'; chip.textContent=word.word;
-      if (word.end>=start && word.start<=end) chip.classList.add('hit');
+      if (showEvidence && word.end>=start && word.start<=end) chip.classList.add('hit');
       if (word.start>mappedEnd+.02) chip.classList.add('unmapped');
       chip.title=`${numeric(word.start,2)}–${numeric(word.end,2)} 秒`;
       chip.addEventListener('click',()=>seek(word.start,true)); holder.append(chip);
@@ -179,25 +207,55 @@
     const status=styles[pred.polarity]; $('case-pill').className='pill '+status; $('case-pill').textContent=labels[pred.polarity];
     $('prediction-label').className='pill '+status; $('prediction-label').textContent=labels[pred.polarity];
     const s=Number(pred.sentiment_strength); $('strength').textContent=(s>0?'+':'')+numeric(s);
-    $('hero-note').textContent=`主要模态：${modality[pred.main_modality]} · 实际可用：${pred.available_modalities.split(',').map(x=>modality[x]).join('、')} · 转写覆盖 ${numeric(Number(pred.aligned_word_coverage)*100,1)}%`;
+    $('hero-note').textContent=`最大影响模态：${modality[pred.main_influence_modality||pred.main_modality]||'无'} · 实际可用：${pred.available_modalities.split(',').map(x=>modality[x]).join('、')} · 转写覆盖 ${numeric(Number(pred.aligned_word_coverage)*100,1)}%`;
     $('probabilities').replaceChildren(
       rowBar('负向',pred.p_negative,'#bd5447'),rowBar('中性',pred.p_neutral,'#718795'),rowBar('正向',pred.p_positive,'#278c72'));
-    $('shares').replaceChildren(...['text','audio','vision'].map(key=>rowBar(modality[key],pred['class_share_'+key],colors[key])));
-    $('raw-shapley').textContent='原始贡献  T '+numeric(pred.shapley_class_text)+' / A '+numeric(pred.shapley_class_audio)+' / V '+numeric(pred.shapley_class_vision);
-    $('quote').textContent=ev.evidence_words || '未映射';
-    $('deletion').textContent=numeric(ev.class_margin_drop); $('insertion').textContent=numeric(ev.insertion_margin_gain);
-    $('window-note').textContent=`${modality[ev.modality]}窗口 · ${numeric(ev.start_seconds,2)}–${numeric(ev.end_seconds,2)} 秒 · 词元位置 ${ev.position_start}–${Number(ev.position_end_exclusive)-1} · 联合分数 ${numeric(ev.joint_evidence_score)}`;
-    const warning=$('coverage-warning'); warning.hidden=pred.evidence_scope!=='partial_aligned_transcript';
+    const signed=['text','audio','vision'].map(key=>({key,value:Number(pred['shapley_class_'+key])}));
+    const shapleyTotal=signed.reduce((sum,item)=>sum+Math.abs(item.value),0);
+    $('signed-shares').replaceChildren(...signed.map(item=>signedRow(modality[item.key],item.value,
+      pred['influence_share_'+item.key]!==undefined?pred['influence_share_'+item.key]:(shapleyTotal?Math.abs(item.value)/shapleyTotal:0))));
+    $('shares').replaceChildren(...signed.map(item=>rowBar(modality[item.key],
+      pred['influence_share_'+item.key]!==undefined?pred['influence_share_'+item.key]:(shapleyTotal?Math.abs(item.value)/shapleyTotal:0),colors[item.key])));
+    $('raw-shapley').textContent='强度归因  T '+numeric(pred.shapley_strength_text)+' / A '+numeric(pred.shapley_strength_audio)+' / V '+numeric(pred.shapley_strength_vision);
+    const confirmed=ev.selection_status==='confirmed';
+    const showEvidence=confirmed||showCandidates;
+    const fewControls=Number(ev.random_window_count)<19;
+    $('evidence-status').innerHTML=confirmed?'<span class="mini-tag">多项复核通过</span>':
+      `<span class="mini-tag bad">候选证据 · ${fewControls?'随机对照数量不足':'尚未通过随机对照'}</span>`;
+    $('toggle-candidates').textContent=showCandidates?'隐藏待核候选':'显示待核候选';
+    $('quote').textContent=showEvidence?(ev.core_evidence||ev.evidence_words||'未映射'):'当前没有通过全部复核的局部证据';
+    $('context').textContent=showEvidence?(ev.semantic_context||'未记录上下文'):
+      (fewControls?'当前视频不足以提供19个非重叠随机窗口，无法达到现用的0.05经验阈值；这不表示预测或候选证据被证伪。':'可播放视频自行审查；待核窗口默认不作为证据高亮。');
+    $('play-evidence').disabled=!showEvidence; $('seek-evidence').disabled=!showEvidence;
+    $('deletion').textContent=numeric(ev.class_margin_drop);
+    $('conditional').textContent=ev.conditional_gain!==undefined?numeric(ev.conditional_gain):'待重算';
+    $('window-note').textContent=`${modality[ev.modality]}核心窗口 · ${numeric(ev.core_start_seconds||ev.start_seconds,2)}–${numeric(ev.core_end_seconds||ev.end_seconds,2)} 秒；上下文事件 ${numeric(ev.start_seconds,2)}–${numeric(ev.end_seconds,2)} 秒 · Early/Late ${ev.text_mask_agreement===true||ev.text_mask_agreement==='True'?'一致':'待核或不一致'}`;
+    const stability=Number(ev.n_checkpoints)>1?`检查点稳定性：预测 ${numeric(ev.s_pred,2)} · 模态 ${numeric(ev.s_mod,2)} · 区间 ${numeric(ev.s_evidence,2)}`:'单检查点，跨检查点稳定性不适用';
+    $('stability').textContent=ev.s_pred!==undefined?`${stability}；同模态随机窗口经验 p=${numeric(ev.random_window_p,3)} (${ev.random_window_count} 个对照)；输出头随机化 ${ev.parameter_control_pass==='True'||ev.parameter_control_pass===true?'通过':'未通过'}。`:'';
+    const eventValues=['text','audio','vision'].map(key=>({key,value:Number(ev['event_drop_'+key]||0)}));
+    const eventTotal=eventValues.reduce((sum,item)=>sum+Math.abs(item.value),0);
+    $('event-modalities').replaceChildren(...eventValues.map(item=>signedRow(modality[item.key],item.value,
+      eventTotal?Math.abs(item.value)/eventTotal:0)));
+    const warning=$('coverage-warning'); warning.textContent='';
+    warning.hidden=pred.evidence_scope!=='partial_aligned_transcript';
     if (!warning.hidden) warning.textContent=`仅有 ${pred.mapped_word_count}/${pred.aligned_word_count} 个对齐词进入模型映射；浅灰尾段不提供模型证据。`;
+    if(ev.mapping_status==='partial'){warning.hidden=false;warning.textContent+=' 当前事件只有部分词位映射到视频，不补造未覆盖时间。';}
+    if(pred.polarity==='Negative' && /\b(absolutely not|no way|not at all)\b/i.test(ev.core_evidence||'')
+        && (ev.semantic_context||'').includes('?')){
+      warning.hidden=false;warning.textContent+=' 问答中的否定可能是在否定前文问题；当前负向预测需要人工复核。';
+    }
     const total=Number(pred.aligned_last_word_end), mapped=Number(pred.mapped_time_end), start=Number(ev.start_seconds), end=Number(ev.end_seconds);
     $('time-total').textContent=numeric(total,2)+' 秒'; $('mapped').style.width=(100*mapped/total)+'%';
+    $('evidence-range').hidden=!showEvidence;
     $('evidence-range').style.left=(100*start/total)+'%'; $('evidence-range').style.width=(100*(end-start)/total)+'%';
     $('playhead').style.left='0%'; $('time-current').textContent='0.00 秒';
-    video.src=record.video_url; video.load(); $('video-error').textContent=''; renderWords(record);
+    video.src=record.video_url; video.load(); $('video-error').textContent=''; renderWords(record,showEvidence);
   }
   $('play-evidence').addEventListener('click',()=>{const ev=records[current].evidence; stopAt=Number(ev.end_seconds); seek(ev.start_seconds,true);});
   $('seek-evidence').addEventListener('click',()=>seek(records[current].evidence.start_seconds));
   $('prev-case').addEventListener('click',()=>render(current-1)); $('next-case').addEventListener('click',()=>render(current+1));
+  $('sample-search').addEventListener('input',renderList);
+  $('toggle-candidates').addEventListener('click',()=>{showCandidates=!showCandidates;render(current);});
   $('track').addEventListener('click',event=>{const width=event.currentTarget.getBoundingClientRect(); const frac=(event.clientX-width.left)/width.width;
     seek(frac*Number(records[current].prediction.aligned_last_word_end));});
   video.addEventListener('timeupdate',()=>{const total=Number(records[current].prediction.aligned_last_word_end);

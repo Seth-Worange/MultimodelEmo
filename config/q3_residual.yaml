@@ -1,0 +1,43 @@
+# 问题三候选：冻结问题二主线骨干，在完整输入上训练跨时段残差。
+train:
+  data_root: data
+  device: cuda
+  architecture: q3_residual
+  source_checkpoint: outputs/runs/q2_fuse_lowaux_s2026/best.pt
+  text_mode: bert
+  regression_mode: soft
+  normalize_inputs: true
+  corruption_probability: 0.0
+  clean_supervision_weight: 1.0
+  selection_scope: clean
+  evaluation_protocol: sample_v2
+  evaluation_seed: 2026
+  epochs: 18
+  patience: 4
+  batch_size: 32
+  lr: 0.0003
+  dropout: 0.2
+  transformer_heads: 4
+  seed: 2026
+  output_dir: outputs/q3_residual_s2026
+
+evaluate:
+  checkpoint: [outputs/q3_residual_s2026/best.pt]
+  split: valid
+  data_root: data
+  device: cuda
+  batch_size: 64
+  seed: 2026
+  evaluation_protocol: sample_v2
+  neutral_zero: true
+  output: outputs/diagnostics/q3_residual_s2026/validation.json
+
+infer:
+  part: q3
+  checkpoint: [outputs/q3_residual_s2026/best.pt]
+  neutral_zero: true
+  device: cuda
+  data_root: data
+  output_dir: outputs/predictions_q3_residual_s2026
+  alignment_file: outputs/runs/main/q3_alignment.json
+  max_samples: 0

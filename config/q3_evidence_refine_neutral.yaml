@@ -7,6 +7,8 @@ refine:
     - outputs/runs/q2_fuse_lowaux_s2027/best.pt
   neutral_zero: true
   evidence_csv: outputs/predictions_q3_mixed_neutral/q3_evidence_windows.csv
+  predictions_csv: outputs/predictions_q3_mixed_neutral/q3_predictions.csv
+  alignment_file: outputs/runs/main/q3_alignment.json
   data_root: data
   output_dir: outputs/predictions_q3_mixed_neutral
   top_k: 10

@@ -23,6 +23,8 @@ from model import AffectiveModel
 from model.fuse_net import FactorizedAffectiveModel
 from model.complementary_net import ComplementaryAffectiveModel
 from model.cica_net import CICAAffectiveModel
+from model.q3_temporal import Q3TemporalModel
+from model.q3_residual import Q3ResidualModel
 from model.input_processing import fill_legacy_input_buffers
 
 LABELS = ("Negative", "Neutral", "Positive")
@@ -77,6 +79,10 @@ def build_from_config(config: dict | None) -> torch.nn.Module:
         return ComplementaryAffectiveModel(**config)
     if architecture == "cica":
         return CICAAffectiveModel(**config)
+    if architecture == "q3_temporal":
+        return Q3TemporalModel(**config)
+    if architecture == "q3_residual":
+        return Q3ResidualModel(**config)
     config.pop("tau", None)
     return AffectiveModel(**config)
 
@@ -369,8 +375,12 @@ def main() -> None:
                 model, batch, text_encoder=text_encoder)
             row.update({f"shapley_class_{m}": phi_cls[m] for m in MODALITIES})
             row.update({f"class_share_{m}": share[m] for m in MODALITIES})
+            total_influence = sum(abs(value) for value in phi_cls.values())
+            row.update({f"influence_share_{m}": abs(phi_cls[m]) / total_influence
+                        if total_influence else 0.0 for m in MODALITIES})
             row.update({f"shapley_strength_{m}": phi_reg[m] for m in MODALITIES})
             row["main_modality"] = main_modality
+            row["main_influence_modality"] = max(MODALITIES, key=lambda m: abs(phi_cls[m]))
             item_alignment = alignment.get(sample_id, {})
             row.update(alignment_coverage(item_alignment))
             positions = item_alignment.get("positions", [])

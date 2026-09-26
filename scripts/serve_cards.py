@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import threading
+import webbrowser
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -98,12 +100,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--no-open", action="store_true", help="只启动服务，不自动打开浏览器")
+    parser.add_argument("--rebuild", action="store_true", help="启动前从最新预测和证据表重建页面")
     args = parser.parse_args()
+    page_file = ROOT / "outputs/predictions_q3_mixed_neutral/explanation_cards.html"
+    if args.rebuild or not page_file.is_file():
+        from scripts.build_q3_cards import main as build_cards
+        build_cards()
     handler = partial(RangeRequestHandler, directory=str(ROOT))
     server = ThreadingHTTPServer((args.host, args.port), handler)
     page = f"http://{args.host}:{args.port}/outputs/predictions_q3_mixed_neutral/explanation_cards.html"
     print(f"serving {ROOT}")
     print(f"open {page}")
+    if not args.no_open:
+        threading.Timer(0.6, webbrowser.open, args=(page,)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
