@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -21,10 +22,10 @@ def read_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def make_records() -> list[dict]:
-    predictions = read_rows(OUTPUT / "q3_predictions.csv")
-    evidence = read_rows(OUTPUT / "q3_selected_evidence.csv")
-    alignment = json.loads(ALIGNMENT.read_text(encoding="utf-8"))
+def make_records(output_dir: Path = OUTPUT, alignment_file: Path = ALIGNMENT) -> list[dict]:
+    predictions = read_rows(output_dir / "q3_predictions.csv")
+    evidence = read_rows(output_dir / "q3_selected_evidence.csv")
+    alignment = json.loads(alignment_file.read_text(encoding="utf-8"))
     if len(predictions) != 20 or len(evidence) != 20:
         raise ValueError("附件4预测与证据必须各有20条")
     by_evidence = {row["id"]: row for row in evidence}
@@ -50,15 +51,19 @@ def make_records() -> list[dict]:
     return records
 
 
-def main() -> None:
-    records = make_records()
+def main(output_dir: Path = OUTPUT, alignment_file: Path = ALIGNMENT) -> None:
+    records = make_records(output_dir, alignment_file)
     payload = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
     payload = payload.replace("<", "\\u003c").replace("&", "\\u0026")
     html = TEMPLATE.read_text(encoding="utf-8").replace("__CARD_DATA__", payload)
-    target = OUTPUT / "explanation_cards.html"
+    target = output_dir / "explanation_cards.html"
     target.write_text(html, encoding="utf-8")
     print(f"wrote {target} ({len(records)} samples, videos linked in place)")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT)
+    parser.add_argument("--alignment-file", type=Path, default=ALIGNMENT)
+    args = parser.parse_args()
+    main(args.output_dir, args.alignment_file)

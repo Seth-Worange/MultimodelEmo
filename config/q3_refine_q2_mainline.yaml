@@ -1,0 +1,11 @@
+# 单模型Q2主线对应的附件4证据复核，输出与旧集成版本隔离。
+refine:
+  checkpoint: [outputs/runs/q2_fuse_lowaux_s2026/best.pt]
+  neutral_zero: true
+  evidence_csv: outputs/predictions_q3_q2_mainline/q3_evidence_windows.csv
+  predictions_csv: outputs/predictions_q3_q2_mainline/q3_predictions.csv
+  alignment_file: outputs/runs/main/q3_alignment.json
+  data_root: data
+  output_dir: outputs/predictions_q3_q2_mainline
+  top_k: 10
+  device: cuda

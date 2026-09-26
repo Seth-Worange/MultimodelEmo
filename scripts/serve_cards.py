@@ -102,14 +102,17 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--no-open", action="store_true", help="只启动服务，不自动打开浏览器")
     parser.add_argument("--rebuild", action="store_true", help="启动前从最新预测和证据表重建页面")
+    parser.add_argument("--output-dir", type=Path,
+                        default=Path("outputs/predictions_q3_mixed_neutral"),
+                        help="要展示的附件4预测结果目录")
     args = parser.parse_args()
-    page_file = ROOT / "outputs/predictions_q3_mixed_neutral/explanation_cards.html"
+    page_file = (ROOT / args.output_dir / "explanation_cards.html").resolve()
     if args.rebuild or not page_file.is_file():
         from scripts.build_q3_cards import main as build_cards
-        build_cards()
+        build_cards(page_file.parent)
     handler = partial(RangeRequestHandler, directory=str(ROOT))
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    page = f"http://{args.host}:{args.port}/outputs/predictions_q3_mixed_neutral/explanation_cards.html"
+    page = f"http://{args.host}:{args.port}/{page_file.relative_to(ROOT).as_posix()}"
     print(f"serving {ROOT}")
     print(f"open {page}")
     if not args.no_open:
